@@ -18,6 +18,12 @@ router.post('/conversation', (req, res) => {
 router.post('/', chatController.sendMessage);
 router.post('/message', chatController.sendMessage);
 
+// Sync itinerary from form flow
+router.post('/sync-itinerary', chatController.syncItinerary);
+
+// Modify itinerary
+router.post('/modify-itinerary', chatController.modifyItinerary);
+
 // Get conversation history (alias routes for compatibility)
 router.get('/history/:conversationId', chatController.getConversation);
 router.get('/:conversationId', chatController.getConversation);

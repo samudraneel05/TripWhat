@@ -28,6 +28,10 @@ const AgentStateAnnotation = Annotation.Root({
     reducer: (left, right) => right ?? left,
     default: () => undefined,
   }),
+  detectedIntent: Annotation<DetectedIntent | undefined>({
+    reducer: (left, right) => right ?? left,
+    default: () => undefined,
+  }),
   searchResults: Annotation<Destination[] | undefined>({
     reducer: (left, right) => right ?? left,
     default: () => undefined,
@@ -154,6 +158,7 @@ export class TravelAgent {
 
       return {
         intent: intentString,
+        detectedIntent: detectedIntent, // Store full intent data
         searchResults: detectedIntent.entities.google_place_types as any, // Store place types temporarily
         messages: [new AIMessage(`Understood: ${detectedIntent.reasoning}`)],
       };
@@ -172,7 +177,7 @@ export class TravelAgent {
   private async toolExecutorNode(state: AgentState): Promise<Partial<AgentState>> {
     console.log('\n🔧 [TOOL EXECUTOR] Running tools for intent:', state.intent);
     try {
-      const { intent, userQuery } = state;
+      const { intent, userQuery, detectedIntent } = state;
       
       // Extract detected place types (stored temporarily in searchResults by planner)
       const detectedPlaceTypes = (state.searchResults as any) || [];
@@ -291,6 +296,26 @@ export class TravelAgent {
           }
           
           return { itinerary };
+        }
+
+        case 'add_activity':
+        case 'remove_activity':
+        case 'replace_activity':
+        case 'move_activity':
+        case 'find_and_add':
+        case 'add_day':
+        case 'remove_day':
+        case 'modify_activity': {
+          console.log(`🔧 [TOOL] Handling itinerary modification: ${intent}`);
+          
+          // For now, return a message indicating feature is being implemented
+          // We'll handle this in the route where we have access to the current itinerary
+          if (detectedIntent) {
+            return { 
+              response: await this.handleItineraryModificationIntent(detectedIntent, userQuery)
+            };
+          }
+          return { error: 'Could not detect intent for modification' };
         }
 
         default:
@@ -677,6 +702,7 @@ Provide a compelling, informative description of this place. Include its highlig
         conversationId,
         timestamp: new Date(),
         intent: undefined,
+        detectedIntent: undefined,
         searchResults: undefined,
         nearbyAttractions: undefined,
         placeDetails: undefined,
@@ -712,6 +738,7 @@ Provide a compelling, informative description of this place. Include its highlig
       
       const { TRAVEL_TYPE_PREFERENCES, calculateDailyBudget } = await import('../types/tripContext.js');
       const { enhancedItineraryBuilder } = await import('../services/enhancedItineraryBuilder.js');
+      const { flightService } = await import('../services/flightService.js');
       
       // Calculate total days from cities
       const totalDays = tripContext.cities.reduce((sum: number, city: any) => sum + city.days, 0);
@@ -731,11 +758,82 @@ Provide a compelling, informative description of this place. Include its highlig
       console.log('🗓️ Total days:', totalDays);
       console.log('🏙️ Cities:', tripContext.cities.map((c: any) => `${c.name} (${c.days} days)`));
       
+      // Get IATA codes for all cities
+      console.log('\n✈️ [FLIGHTS] Looking up IATA codes for cities...');
+      const cityIATACodes = new Map<string, string>();
+      for (const city of tripContext.cities) {
+        try {
+          const iataCode = await flightService.getCityIATACode(city.name);
+          if (iataCode) {
+            cityIATACodes.set(city.name, iataCode);
+            console.log(`   ✅ ${city.name} → ${iataCode}`);
+          } else {
+            console.log(`   ⚠️  ${city.name} → No IATA code found`);
+          }
+        } catch (error) {
+          console.log(`   ❌ ${city.name} → IATA lookup failed`);
+        }
+      }
+      
       // Build itineraries for each city using enhanced builder
       const allDays: any[] = [];
-      let currentDayNumber = 1;
+      let currentDayNumber = 0; // Start at 0 for departure day
       
-      for (const city of tripContext.cities) {
+      // Add departure flight if origin city is specified and first destination has IATA
+      if (tripContext.origin && tripContext.cities.length > 0) {
+        const firstCity = tripContext.cities[0];
+        const destIATA = cityIATACodes.get(firstCity.name);
+        
+        if (destIATA) {
+          try {
+            console.log(`\n✈️ [FLIGHTS] Searching departure flight: ${tripContext.origin} → ${firstCity.name}`);
+            
+            // Get origin IATA
+            const originIATA = await flightService.getCityIATACode(tripContext.origin);
+            
+            if (originIATA) {
+              const departureDate = new Date(tripContext.startDate);
+              const departureFlight = await flightService.getBestFlight({
+                origin: originIATA,
+                destination: destIATA,
+                departureDate: departureDate.toISOString().split('T')[0],
+                adults: tripContext.people || 1,
+              });
+              
+              if (departureFlight) {
+                console.log(`   ✅ Found departure flight: $${departureFlight.price.amount} ${departureFlight.price.currency}`);
+                console.log(`      Duration: ${flightService.formatDuration(departureFlight.duration)}`);
+                console.log(`      Carrier: ${departureFlight.provider}`);
+                
+                // Add departure day (Day 0)
+                allDays.push({
+                  dayNumber: 0,
+                  title: 'Departure Day',
+                  city: tripContext.origin,
+                  date: departureDate.toISOString().split('T')[0],
+                  travel: departureFlight,
+                  timeSlots: [{
+                    label: 'travel',
+                    activities: [{
+                      ...departureFlight,
+                      name: `Flight to ${firstCity.name}`,
+                    }]
+                  }]
+                });
+              } else {
+                console.log(`   ⚠️  No flights found for departure`);
+              }
+            }
+          } catch (error) {
+            console.error(`   ❌ Error searching departure flight:`, error);
+          }
+        }
+      }
+      
+      currentDayNumber = 1;
+      
+      for (let i = 0; i < tripContext.cities.length; i++) {
+        const city = tripContext.cities[i];
         console.log(`\n🌐 [WEB SEARCH] Processing ${city.name} (${city.days} days)`);
         
         // Use enhanced builder with web search + Google Places
@@ -761,8 +859,107 @@ Provide a compelling, informative description of this place. Include its highlig
           });
           
           console.log(`✅ Generated ${cityItinerary.days.length} days for ${city.name}`);
+          
+          // Check if there's a next city for inter-city travel
+          if (i < tripContext.cities.length - 1) {
+            const nextCity = tripContext.cities[i + 1];
+            const currentIATA = cityIATACodes.get(city.name);
+            const nextIATA = cityIATACodes.get(nextCity.name);
+            
+            if (currentIATA && nextIATA) {
+              try {
+                console.log(`\n✈️ [FLIGHTS] Searching inter-city transport: ${city.name} → ${nextCity.name}`);
+                
+                const travelDate = new Date(tripContext.startDate);
+                travelDate.setDate(travelDate.getDate() + currentDayNumber);
+                
+                const interCityFlight = await flightService.getBestFlight({
+                  origin: currentIATA,
+                  destination: nextIATA,
+                  departureDate: travelDate.toISOString().split('T')[0],
+                  adults: tripContext.people || 1,
+                });
+                
+                if (interCityFlight) {
+                  console.log(`   ✅ Found inter-city flight: $${interCityFlight.price.amount} ${interCityFlight.price.currency}`);
+                  console.log(`      Duration: ${flightService.formatDuration(interCityFlight.duration)}`);
+                  
+                  // Add travel day
+                  allDays.push({
+                    dayNumber: currentDayNumber++,
+                    title: `Travel Day: ${city.name} → ${nextCity.name}`,
+                    city: city.name,
+                    date: travelDate.toISOString().split('T')[0],
+                    travel: interCityFlight,
+                    timeSlots: [{
+                      label: 'travel',
+                      activities: [{
+                        ...interCityFlight,
+                        name: `Flight to ${nextCity.name}`,
+                      }]
+                    }]
+                  });
+                } else {
+                  console.log(`   ⚠️  No flights found for ${city.name} → ${nextCity.name}`);
+                }
+              } catch (error) {
+                console.error(`   ❌ Error searching inter-city flight:`, error);
+              }
+            }
+          }
         } else {
           console.error(`❌ Failed to generate itinerary for ${city.name}`);
+        }
+      }
+      
+      // Add return flight
+      if (tripContext.origin && tripContext.cities.length > 0) {
+        const lastCity = tripContext.cities[tripContext.cities.length - 1];
+        const lastIATA = cityIATACodes.get(lastCity.name);
+        
+        if (lastIATA) {
+          try {
+            console.log(`\n✈️ [FLIGHTS] Searching return flight: ${lastCity.name} → ${tripContext.origin}`);
+            
+            const originIATA = await flightService.getCityIATACode(tripContext.origin);
+            
+            if (originIATA) {
+              const returnDate = new Date(tripContext.startDate);
+              returnDate.setDate(returnDate.getDate() + totalDays);
+              
+              const returnFlight = await flightService.getBestFlight({
+                origin: lastIATA,
+                destination: originIATA,
+                departureDate: returnDate.toISOString().split('T')[0],
+                adults: tripContext.people || 1,
+              });
+              
+              if (returnFlight) {
+                console.log(`   ✅ Found return flight: $${returnFlight.price.amount} ${returnFlight.price.currency}`);
+                console.log(`      Duration: ${flightService.formatDuration(returnFlight.duration)}`);
+                
+                // Add return day
+                allDays.push({
+                  dayNumber: currentDayNumber++,
+                  title: 'Return Day',
+                  city: lastCity.name,
+                  date: returnDate.toISOString().split('T')[0],
+                  travel: returnFlight,
+                  timeSlots: [{
+                    label: 'travel',
+                    activities: [{
+                      ...returnFlight,
+                      name: `Flight to ${tripContext.origin}`,
+                    }]
+                  }]
+                });
+              } else {
+                console.log(`   ⚠️  No return flights found`);
+              }
+            }
+          } catch (error) {
+            console.error(`   ❌ Error searching return flight:`, error);
+          }
         }
       }
       
@@ -979,15 +1176,23 @@ Provide a compelling, informative description of this place. Include its highlig
       if (Object.keys(daysByCity).length > 1) {
         response += `# 🏙️ ${city}\n\n`;
       }
-
+      
       (cityDays as any[]).forEach((day) => {
         response += `## 📅 Day ${day.dayNumber}: ${day.title}\n\n`;
 
         day.timeSlots.forEach((slot: any) => {
           if (slot.activities.length === 0) return;
 
-          const emoji = slot.period === 'morning' ? '☀️' : slot.period === 'afternoon' ? '🌆' : '🌙';
-          response += `### ${emoji} ${slot.period.charAt(0).toUpperCase() + slot.period.slice(1)} (${slot.startTime}-${slot.endTime})\n\n`;
+          // Handle travel/flight slots differently
+          if (slot.label === 'travel') {
+            response += `### ✈️ Travel\n\n`;
+          } else {
+            const period = slot.period || slot.timeOfDay || 'Activity';
+            const emoji = period === 'morning' ? '☀️' : period === 'afternoon' ? '🌆' : '🌙';
+            const periodLabel = period.charAt(0).toUpperCase() + period.slice(1);
+            const timeRange = slot.startTime && slot.endTime ? ` (${slot.startTime}-${slot.endTime})` : '';
+            response += `### ${emoji} ${periodLabel}${timeRange}\n\n`;
+          }
 
           slot.activities.forEach((activity: any, idx: number) => {
             response += `**${idx + 1}. ${activity.name}**\n`;
@@ -1022,6 +1227,90 @@ Provide a compelling, informative description of this place. Include its highlig
     response += `👥 Perfect for: **${tripContext.people} ${tripContext.people === 1 ? 'person' : 'people'}**\n\n`;
 
     return response;
+  }
+
+  /**
+   * Handle itinerary modification intents
+   */
+  private async handleItineraryModificationIntent(
+    intentData: DetectedIntent,
+    userQuery: string
+  ): Promise<string> {
+    const intent = intentData.primary_intent;
+    const entities = intentData.entities;
+
+    // Build a helpful response based on the intent
+    switch (intent) {
+      case 'add_activity':
+        if (entities.place_name) {
+          return `I can help you add ${entities.place_name} to your itinerary! To do this, I'll need to know:\n\n` +
+                 `1. Which day would you like to add it to?\n` +
+                 `2. What time of day? (morning, afternoon, or evening)\n\n` +
+                 `For example, you could say: "Add ${entities.place_name} to Day 2 morning"`;
+        }
+        return `I can help you add activities to your itinerary! Please specify:\n\n` +
+               `1. What would you like to add?\n` +
+               `2. Which day?\n` +
+               `3. What time? (morning, afternoon, or evening)\n\n` +
+               `For example: "Add the Eiffel Tower to Day 2 morning"`;
+
+      case 'remove_activity':
+        if (entities.activity_name) {
+          return `I can remove ${entities.activity_name} from your itinerary. ` +
+                 `${entities.target_day ? `From Day ${entities.target_day}?` : 'Which day is it on?'}`;
+        }
+        return `I can help you remove activities! Please tell me:\n\n` +
+               `1. Which activity to remove?\n` +
+               `2. Which day is it on?\n\n` +
+               `For example: "Remove the museum visit from Day 1"`;
+
+      case 'replace_activity':
+        return `I can help you replace activities! Please tell me:\n\n` +
+               `1. What activity do you want to replace?\n` +
+               `2. Which day is it on?\n` +
+               `3. What should I replace it with?\n\n` +
+               `For example: "Replace the shopping on Day 2 with a museum visit"`;
+
+      case 'move_activity':
+        return `I can move activities between days! Please tell me:\n\n` +
+               `1. Which activity to move?\n` +
+               `2. From which day?\n` +
+               `3. To which day and time?\n\n` +
+               `For example: "Move the Louvre from Day 1 to Day 2 afternoon"`;
+
+      case 'find_and_add':
+        if (entities.preferences && entities.preferences.length > 0) {
+          return `Great! I can find ${entities.preferences.join(' and ')} activities for you. ` +
+                 `${entities.target_day ? `I'll add them to Day ${entities.target_day}. ` : 'Which day would you like these on? '}` +
+                 `Let me search for the best options!`;
+        }
+        return `I can find and add activities based on your interests! What are you interested in?\n\n` +
+               `For example: "I love art, add some museums to Day 3"`;
+
+      case 'add_day':
+        return `I can add another day to your trip! This will create a new day with morning, afternoon, and evening time slots. ` +
+               `Would you like me to go ahead and add Day ${entities.duration ? entities.duration + 1 : 'X + 1'}?`;
+
+      case 'remove_day':
+        if (entities.target_day) {
+          return `I can remove Day ${entities.target_day} from your itinerary. ` +
+                 `⚠️ This will delete all activities planned for that day. Are you sure?`;
+        }
+        return `Which day would you like to remove from your itinerary?`;
+
+      case 'modify_activity':
+        return `I can modify activity details like time or duration. What would you like to change?\n\n` +
+               `For example: "Move the museum visit to the afternoon" or "Extend the park time to 2 hours"`;
+
+      default:
+        return `I can help you modify your itinerary! You can:\n\n` +
+               `• Add activities: "Add the Eiffel Tower to Day 2"\n` +
+               `• Remove activities: "Remove shopping from Day 1"\n` +
+               `• Find & add: "I love art, add museums to Day 3"\n` +
+               `• Move activities: "Move Louvre to Day 2"\n` +
+               `• Add/remove days: "Add another day to my trip"\n\n` +
+               `What would you like to do?`;
+    }
   }
 }
 

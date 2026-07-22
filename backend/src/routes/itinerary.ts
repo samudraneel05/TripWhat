@@ -45,6 +45,7 @@ router.post("/generate", async (req, res) => {
     }
 
     console.log("📋 Generating itinerary with context:", {
+      origin: tripContext.origin || 'NOT SET',
       cities: tripContext.cities.map((c) => `${c.name} (${c.days}d)`),
       budget: `$${tripContext.budget.total} (${tripContext.budgetMode})`,
       people: tripContext.people,

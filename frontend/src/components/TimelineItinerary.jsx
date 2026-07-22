@@ -564,11 +564,99 @@ export const TimelineItinerary = ({ itinerary, tripData, onActiveDayChange, scro
 
                       {/* Activities - Enhanced Cards with Images */}
                       <div className="space-y-6 ml-6">
-                        {slot.activities?.map((activity, actIndex) => (
-                          <Card
-                            key={actIndex}
-                            className="overflow-hidden bg-white border-gray-200 hover:shadow-lg transform hover:-translate-y-1 transition-all duration-300"
-                          >
+                        {slot.activities?.map((activity, actIndex) => {
+                          // Check if this is a travel/flight activity
+                          if (activity.type === 'flight' || activity.type === 'travel' || slot.label === 'travel') {
+                            return (
+                              <Card
+                                key={actIndex}
+                                className="overflow-hidden bg-gradient-to-br from-blue-50 to-purple-50 border-2 border-blue-200 hover:shadow-xl transform hover:-translate-y-1 transition-all duration-300"
+                              >
+                                <div className="p-6">
+                                  {/* Flight Header */}
+                                  <div className="flex items-center gap-3 mb-4">
+                                    <div className="flex items-center justify-center w-12 h-12 rounded-full bg-blue-500 shadow-lg">
+                                      <Plane className="w-6 h-6 text-white" />
+                                    </div>
+                                    <div className="flex-1">
+                                      <h3 className="text-xl font-bold text-gray-900">
+                                        {activity.name || `Flight: ${activity.from} → ${activity.to}`}
+                                      </h3>
+                                      <p className="text-sm text-gray-600">
+                                        {activity.provider || 'Flight'}
+                                      </p>
+                                    </div>
+                                    <div className="text-right">
+                                      <p className="text-2xl font-bold text-blue-600">
+                                        {activity.price?.currency || '$'}{activity.price?.amount || activity.price?.total || 'N/A'}
+                                      </p>
+                                      <p className="text-xs text-gray-500">per person</p>
+                                    </div>
+                                  </div>
+
+                                  {/* Flight Route */}
+                                  <div className="flex items-center justify-between bg-white rounded-lg p-4 mb-4">
+                                    <div className="text-center flex-1">
+                                      <p className="text-sm text-gray-500 mb-1">From</p>
+                                      <p className="text-lg font-bold text-gray-900">{activity.from}</p>
+                                      {activity.departure && (
+                                        <p className="text-sm text-gray-600 mt-1">
+                                          {new Date(activity.departure).toLocaleTimeString('en-US', {
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                          })}
+                                        </p>
+                                      )}
+                                    </div>
+
+                                    <div className="flex-shrink-0 mx-4">
+                                      <div className="flex items-center gap-2">
+                                        <div className="h-px w-8 bg-gray-300"></div>
+                                        <Plane className="w-5 h-5 text-blue-500 transform rotate-90" />
+                                        <div className="h-px w-8 bg-gray-300"></div>
+                                      </div>
+                                      {activity.duration && (
+                                        <p className="text-xs text-gray-500 text-center mt-1 whitespace-nowrap">
+                                          {activity.duration}
+                                        </p>
+                                      )}
+                                    </div>
+
+                                    <div className="text-center flex-1">
+                                      <p className="text-sm text-gray-500 mb-1">To</p>
+                                      <p className="text-lg font-bold text-gray-900">{activity.to}</p>
+                                      {activity.arrival && (
+                                        <p className="text-sm text-gray-600 mt-1">
+                                          {new Date(activity.arrival).toLocaleTimeString('en-US', {
+                                            hour: '2-digit',
+                                            minute: '2-digit',
+                                          })}
+                                        </p>
+                                      )}
+                                    </div>
+                                  </div>
+
+                                  {/* Booking Button */}
+                                  {activity.bookingLink && (
+                                    <Button
+                                      className="w-full bg-blue-600 hover:bg-blue-700"
+                                      onClick={() => window.open(activity.bookingLink, '_blank')}
+                                    >
+                                      <ExternalLink className="w-4 h-4 mr-2" />
+                                      Book Flight
+                                    </Button>
+                                  )}
+                                </div>
+                              </Card>
+                            );
+                          }
+
+                          // Regular activity card
+                          return (
+                            <Card
+                              key={actIndex}
+                              className="overflow-hidden bg-white border-gray-200 hover:shadow-lg transform hover:-translate-y-1 transition-all duration-300"
+                            >
                             <div className="flex">
                               {/* Activity Image - ONLY Google Places */}
                               <div className="w-64 h-48 flex-shrink-0 relative overflow-hidden bg-gradient-to-br from-gray-100 to-gray-200">
@@ -731,7 +819,8 @@ export const TimelineItinerary = ({ itinerary, tripData, onActiveDayChange, scro
                               </div>
                             </div>
                           </Card>
-                        ))}
+                          );
+                        })}
                       </div>
                     </div>
                     );

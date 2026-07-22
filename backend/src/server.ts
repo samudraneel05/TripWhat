@@ -10,6 +10,7 @@ import chatRoutes from "./routes/chat.js";
 import authRoutes from "./routes/auth.js";
 import itineraryRoutes from "./routes/itinerary.js";
 import travelRoutes from "./routes/travel.js";
+import flightRoutes from "./routes/flights.js";
 import savedTripRoutes from "../routes/savedTripRoutes.js";
 import placesRoutes from "../routes/placesRoutes.js";
 import { authenticateToken } from "./middleware/auth.js";
@@ -29,6 +30,10 @@ console.log(
 console.log(
   "  - OPENTRIPMAP_API_KEY:",
   process.env.OPENTRIPMAP_API_KEY ? "✅ Loaded" : "❌ Missing"
+);
+console.log(
+  "  - AMADEUS_API_KEY:",
+  process.env.AMADEUS_API_KEY ? "✅ Loaded" : "⚠️  Missing (optional)"
 );
 
 const app = express();
@@ -71,6 +76,9 @@ app.use("/api/chat", authenticateToken, chatRoutes);
 app.use("/api/itinerary", authenticateToken, itineraryRoutes);
 app.use("/api/travel", travelRoutes);
 app.use("/api/saved-trips", savedTripRoutes);
+
+// Flights routes (public for now - can add auth later)
+app.use("/api/flights", flightRoutes);
 
 // Set Socket.io instance for chat controller
 setSocketIO(io);

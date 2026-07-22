@@ -21,6 +21,15 @@ export const IntentSchema = z.object({
     'get_weather',
     'convert_currency',
     'estimate_budget',
+    // Itinerary modification intents
+    'add_activity',
+    'remove_activity',
+    'replace_activity',
+    'modify_activity',
+    'move_activity',
+    'add_day',
+    'remove_day',
+    'find_and_add',
     'casual_chat',
     'unknown'
   ]).describe('The primary intent of the user query'),
@@ -40,6 +49,13 @@ export const IntentSchema = z.object({
     category: z.string().nullable().optional().describe('Category of interest like museums, parks, restaurants'),
     google_place_types: z.array(z.string()).optional().describe('Google Places API place types detected from query'),
     query_terms: z.array(z.string()).optional().describe('Key search terms'),
+    // Itinerary modification entities
+    target_day: z.number().nullable().optional().describe('Day number to modify (1, 2, 3, etc.)'),
+    time_slot: z.enum(['morning', 'afternoon', 'evening']).nullable().optional().describe('Time slot for activity'),
+    activity_name: z.string().nullable().optional().describe('Name of activity to add/remove/modify'),
+    activity_id: z.string().nullable().optional().describe('ID of activity to modify'),
+    place_name: z.string().nullable().optional().describe('Specific place/venue name'),
+    action_type: z.enum(['add', 'remove', 'replace', 'modify', 'move']).nullable().optional().describe('Type of modification'),
   }).describe('Extracted entities from the query'),
   
   tools_to_call: z.array(z.string()).describe('List of tools that should be called to fulfill this request'),
@@ -180,6 +196,14 @@ Intent Categories:
 - get_weather: Weather information
 - convert_currency: Currency conversion
 - estimate_budget: Budget planning
+- add_activity: User wants to add specific activity/place to itinerary
+- remove_activity: User wants to remove activity from itinerary
+- replace_activity: User wants to swap one activity with another
+- modify_activity: User wants to change activity details (time, duration, etc.)
+- move_activity: User wants to move activity to different day/time
+- add_day: User wants to add another day to trip
+- remove_day: User wants to remove a day from trip
+- find_and_add: User wants AI to find places and add them (e.g., "add some museums")
 - casual_chat: Just chatting, no specific intent
 - unknown: Cannot determine intent
 
@@ -196,7 +220,13 @@ Respond with ONLY a valid JSON object matching this schema:
     "number_of_people": number,
     "preferences": ["preference1", "preference2"],
     "category": "type of attraction/activity",
-    "query_terms": ["search", "terms"]
+    "query_terms": ["search", "terms"],
+    "target_day": 1,
+    "time_slot": "morning|afternoon|evening",
+    "activity_name": "name of activity",
+    "activity_id": "activity ID if known",
+    "place_name": "specific place/venue name",
+    "action_type": "add|remove|replace|modify|move"
   },
   "tools_to_call": ["tool1", "tool2"],
   "confidence": 0.0-1.0,
@@ -229,8 +259,23 @@ Respond with ONLY a valid JSON object matching this schema:
     // Detect Google Places types based on keywords
     let placeTypes: string[] = [];
 
-    // Simple keyword matching
-    if (query.includes('hotel') || query.includes('accommodation') || query.includes('stay')) {
+    // Check for modification intents first
+    if ((query.includes('add') || query.includes('include')) && !query.includes('plan')) {
+      intent = 'add_activity';
+      tools = ['search_attractions', 'modify_itinerary'];
+    } else if (query.includes('remove') || query.includes('delete') || query.includes('take out')) {
+      intent = 'remove_activity';
+      tools = ['modify_itinerary'];
+    } else if (query.includes('replace') || query.includes('swap') || query.includes('change to')) {
+      intent = 'replace_activity';
+      tools = ['search_attractions', 'modify_itinerary'];
+    } else if (query.includes('move') && (query.includes('day') || query.includes('time'))) {
+      intent = 'move_activity';
+      tools = ['modify_itinerary'];
+    } else if (query.includes('modify') || query.includes('adjust') || query.includes('update')) {
+      intent = 'modify_activity';
+      tools = ['modify_itinerary'];
+    } else if (query.includes('hotel') || query.includes('accommodation') || query.includes('stay')) {
       intent = 'search_hotels';
       tools = ['search_hotels'];
       placeTypes = ['hotel', 'lodging', 'resort_hotel'];

@@ -9,10 +9,12 @@ import { parseItineraryFromMarkdown } from '../utils/itineraryParser.js';
 import Navbar from '../components/Navbar.jsx';
 import axios from 'axios';
 import { Plane, MapPin, Calendar, Eye, EyeOff } from 'lucide-react';
+import { useTrip } from '../contexts/TripContext.jsx';
 
 const API_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
 
 export function Chat() {
+  const { tripData } = useTrip();
   const [conversationId, setConversationId] = useState(undefined);
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -23,13 +25,41 @@ export function Chat() {
   const [isItineraryOpen, setIsItineraryOpen] = useState(false);
   const [mapLocations, setMapLocations] = useState([]);
 
-  const { isConnected, agentStatus, lastMessage, lastError, clearLastMessage, clearLastError } = 
+  const { isConnected, agentStatus, lastMessage, lastError, lastItineraryUpdate, clearLastMessage, clearLastError, clearLastItineraryUpdate } = 
     useSocket(conversationId);
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
+
+  // Sync itinerary from TripContext to conversation on mount
+  useEffect(() => {
+    const syncItinerary = async () => {
+      const storedId = localStorage.getItem('tripwhat_conversation_id');
+      const itinerary = tripData.generatedItinerary?.itinerary || tripData.generatedItinerary || tripData.selectedTrip;
+      if (!storedId || !itinerary) return;
+
+      try {
+        const token = localStorage.getItem('tripwhat_token');
+        if (!token) return;
+
+        // Sync the itinerary to the conversation
+        await axios.post(`${API_URL}/api/chat/sync-itinerary`, {
+          conversationId: storedId,
+          itinerary: itinerary
+        }, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        console.log('✅ [CHAT] Synced itinerary from TripContext to conversation');
+      } catch (error) {
+        console.error('Failed to sync itinerary:', error);
+      }
+    };
+
+    syncItinerary();
+  }, [tripData.generatedItinerary, tripData.selectedTrip]);
 
   // Fetch conversation history on initial load
   useEffect(() => {
@@ -154,6 +184,48 @@ export function Chat() {
     }
   }, [lastMessage, lastError, clearLastMessage, clearLastError]);
 
+  // Handle itinerary modifications
+  useEffect(() => {
+    if (lastItineraryUpdate) {
+      console.log('📝 [CHAT] Received itinerary update:', lastItineraryUpdate);
+      
+      // Update the itinerary
+      if (lastItineraryUpdate.updatedItinerary) {
+        setCurrentItinerary(lastItineraryUpdate.updatedItinerary);
+        
+        // Extract locations for the map
+        const locations = [];
+        lastItineraryUpdate.updatedItinerary.days?.forEach(day => {
+          day.timeSlots?.forEach(slot => {
+            slot.activities?.forEach(activity => {
+              if (activity.coordinates) {
+                locations.push({
+                  name: activity.name,
+                  description: activity.description,
+                  lat: activity.coordinates.lat,
+                  lng: activity.coordinates.lng
+                });
+              }
+            });
+          });
+        });
+        
+        setMapLocations(locations);
+      }
+      
+      // Show success message in chat
+      if (lastItineraryUpdate.modification?.message) {
+        setMessages(prev => [...prev, { 
+          role: 'assistant', 
+          content: `✅ ${lastItineraryUpdate.modification.message}`,
+          timestamp: new Date().toISOString()
+        }]);
+      }
+      
+      clearLastItineraryUpdate();
+    }
+  }, [lastItineraryUpdate, clearLastItineraryUpdate]);
+
   const handleSendMessage = async (message) => {
     if (!message.trim() || isLoading) return;
     
@@ -162,12 +234,15 @@ export function Chat() {
     setIsLoading(true);
     
     try {
-      // Save message to backend
+      // Save message to backend (include current itinerary if available)
       const token = localStorage.getItem('tripwhat_token');
+      const itinerary = tripData.generatedItinerary?.itinerary || tripData.generatedItinerary || tripData.selectedTrip;
+      console.log('📤 [CHAT] Sending message with itinerary:', !!itinerary);
+      
       await axios.post(`${API_URL}/api/chat/message`, {
         conversationId,
         message,
-        role: 'user'
+        currentItinerary: itinerary || null, // Send itinerary with every message
       }, {
         headers: { 'Authorization': `Bearer ${token}` }
       });

@@ -8,6 +8,7 @@ export function useSocket(conversationId) {
   const [agentStatus, setAgentStatus] = useState(null);
   const [lastMessage, setLastMessage] = useState(null);
   const [lastError, setLastError] = useState(null);
+  const [lastItineraryUpdate, setLastItineraryUpdate] = useState(null);
   const socketRef = useRef(null);
 
   // Initialize socket connection once on mount
@@ -57,6 +58,16 @@ export function useSocket(conversationId) {
       setLastError({ error: data.error, conversationId: data.conversationId });
     });
 
+    socket.on('itinerary:modified', (data) => {
+      console.log('[SOCKET] Received itinerary:modified for conversation:', data.conversationId);
+      console.log('[SOCKET] Modification:', data.modification);
+      setLastItineraryUpdate({
+        updatedItinerary: data.updatedItinerary,
+        modification: data.modification,
+        conversationId: data.conversationId,
+      });
+    });
+
     // Cleanup only on unmount
     return () => {
       socket.disconnect();
@@ -78,9 +89,10 @@ export function useSocket(conversationId) {
     };
   }, [conversationId]);
 
-  // Reset message/error when they're consumed
+  // Reset message/error/itinerary update when they're consumed
   const clearLastMessage = useCallback(() => setLastMessage(null), []);
   const clearLastError = useCallback(() => setLastError(null), []);
+  const clearLastItineraryUpdate = useCallback(() => setLastItineraryUpdate(null), []);
 
   return {
     socket: socketRef.current,
@@ -88,7 +100,9 @@ export function useSocket(conversationId) {
     agentStatus,
     lastMessage,
     lastError,
+    lastItineraryUpdate,
     clearLastMessage,
     clearLastError,
+    clearLastItineraryUpdate,
   };
 }

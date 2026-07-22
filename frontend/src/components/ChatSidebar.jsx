@@ -4,12 +4,14 @@ import { MessageBubble } from "@/components/Chat/MessageBubble.jsx";
 import { TypingIndicator } from "@/components/Chat/TypingIndicator.jsx";
 import { MessageInput } from "@/components/Chat/MessageInput.jsx";
 import { parseItineraryFromMarkdown } from "@/utils/itineraryParser.js";
+import { useTrip } from "@/contexts/TripContext.jsx";
 import axios from "axios";
 import { Plane, MapPin, X } from "lucide-react";
 
 const API_URL = import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
 
 export function ChatSidebar({ isOpen, onClose, onItineraryUpdate }) {
+  const { tripData } = useTrip();
   const [conversationId, setConversationId] = useState(undefined);
   const [messages, setMessages] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -20,14 +22,44 @@ export function ChatSidebar({ isOpen, onClose, onItineraryUpdate }) {
     agentStatus,
     lastMessage,
     lastError,
+    lastItineraryUpdate,
     clearLastMessage,
     clearLastError,
+    clearLastItineraryUpdate,
   } = useSocket(conversationId);
 
   // Auto-scroll to bottom
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
+
+  // Sync itinerary from TripContext to conversation when sidebar opens
+  useEffect(() => {
+    const syncItinerary = async () => {
+      const storedId = localStorage.getItem("tripwhat_conversation_id");
+      const itinerary = tripData.generatedItinerary?.itinerary || tripData.generatedItinerary || tripData.selectedTrip;
+      if (!storedId || !itinerary || !isOpen) return;
+
+      try {
+        const token = localStorage.getItem("tripwhat_token");
+        if (!token) return;
+
+        // Sync the itinerary to the conversation
+        await axios.post(`${API_URL}/api/chat/sync-itinerary`, {
+          conversationId: storedId,
+          itinerary: itinerary
+        }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        console.log('[SIDEBAR] ✅ Synced itinerary from TripContext to conversation');
+      } catch (error) {
+        console.error('[SIDEBAR] Failed to sync itinerary:', error);
+      }
+    };
+
+    syncItinerary();
+  }, [isOpen, tripData.generatedItinerary, tripData.selectedTrip]);
 
   // Fetch conversation history on initial load
   useEffect(() => {
@@ -137,6 +169,32 @@ export function ChatSidebar({ isOpen, onClose, onItineraryUpdate }) {
     onItineraryUpdate,
   ]);
 
+  // Handle itinerary modifications
+  useEffect(() => {
+    if (lastItineraryUpdate) {
+      console.log('[SIDEBAR] Received itinerary update:', lastItineraryUpdate);
+      
+      // Update parent component with new itinerary
+      if (lastItineraryUpdate.updatedItinerary && onItineraryUpdate) {
+        onItineraryUpdate(lastItineraryUpdate.updatedItinerary);
+      }
+      
+      // Show success message in chat
+      if (lastItineraryUpdate.modification?.message) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content: `✅ ${lastItineraryUpdate.modification.message}`,
+            timestamp: new Date().toISOString(),
+          },
+        ]);
+      }
+      
+      clearLastItineraryUpdate();
+    }
+  }, [lastItineraryUpdate, clearLastItineraryUpdate, onItineraryUpdate]);
+
   const handleSendMessage = async (message) => {
     if (!message.trim() || isLoading) return;
 
@@ -150,11 +208,15 @@ export function ChatSidebar({ isOpen, onClose, onItineraryUpdate }) {
         throw new Error("No authentication token found");
       }
 
+      const itinerary = tripData.generatedItinerary?.itinerary || tripData.generatedItinerary || tripData.selectedTrip;
+      console.log('[SIDEBAR] 📤 Sending message with itinerary:', !!itinerary);
+      
       const response = await axios.post(
         `${API_URL}/api/chat`,
         {
           message,
           conversationId,
+          currentItinerary: itinerary || null, // Send itinerary with every message
         },
         {
           headers: { Authorization: `Bearer ${token}` },

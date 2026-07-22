@@ -92,6 +92,7 @@ const ResultsPage = () => {
               ? tripData.startDate.toISOString()
               : tripData.startDate,
           startLocation: tripData.startLocation,
+          origin: tripData.startLocation?.name || tripData.startLocation, // Add origin for flight search
           cities: (tripData.cities || []).map((c, idx) => ({
             id: c.id || `city-${idx}`,
             name: c.name,
