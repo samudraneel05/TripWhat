@@ -129,7 +129,7 @@ class GmailService:
         url, _ = flow.authorization_url(
             access_type="offline",
             prompt="consent",
-            include_granted_scopes=True,  # incremental authorization
+            include_granted_scopes="true",  # incremental authorization
             state=google_oauth.build_connect_state(user_id, "gmail_connect", code_verifier=verifier),
         )
         return url

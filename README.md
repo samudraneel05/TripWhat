@@ -1,37 +1,72 @@
 # TripWhat
 
-An AI travel agent that closes the loop: **see a place on social media → plan the trip → book it**.
+**You send it a reel. It books you the trip.**
 
-You share an Instagram reel, TikTok, or YouTube link. TripWhat watches the video, pulls out every place it mentions, and saves them. Chat with it to turn those into a real itinerary — it searches live inventory, pulls your existing bookings straight out of Gmail, drops events onto your Google Calendar, and when you're ready, it actually books the flight.
+TripWhat is an AI travel agent that closes the loop everyone else leaves open: inspiration → plan → reservation. Paste an Instagram reel into the app and it *watches the video* — pulls every place mentioned out of the audio, the on-screen text, and the caption, resolves them against Google Places, and files them away. Then you just chat: it builds a day-by-day itinerary with live search, finds the bookings already sitting in your Gmail, drops the trip onto your Google Calendar, and when you say go — it books the flight through Duffel and hands you a confirmation code.
+
+Not a chatbot that suggests. An agent that does.
 
 ## Demo video
 
 > **[Watch the 2-minute demo](<VIDEO_URL_HERE>)**
->
-> *(Link placeholder — recording in progress.)*
+
+<details>
+<summary><b>Demo script</b> (what to record — ~110 seconds)</summary>
+
+1. **Hook (0:00–0:10)** — "Every travel AI gives you a list. This one books the trip." Show the landing page briefly.
+2. **Reel → places (0:10–0:35)** — Open the Saved tab, paste an Instagram reel link. Show the live progress states while the pipeline runs: metadata → Gemini video understanding → Places resolution. The saved place card appears with photo, rating, address. *"It watched the video — those places were never in the caption."*
+3. **Chat → itinerary (0:35–0:60)** — Ask for a trip using the saved place. Show the agent's question cards (native interrupts), the parallel search activity indicators, and the itinerary building live on the map.
+4. **Gmail + Calendar (0:60–0:85)** — Click Connect Gmail in the sidebar, OAuth round-trip, bookings list populates, "Add to trip". Show a Calendar event created.
+5. **Book it (0:85–1:45)** — "Search flights for this trip" → offers render → "book the first one" → agent confirms passenger details → **real Duffel order + booking reference on screen**.
+6. **Proof (1:45–2:00)** — Flash the LangSmith trace view and the eval benchmark output. *"80-case eval suite, full trace observability, 170 automated tests."*
+</details>
 
 ## The flow
 
-1. **Inspiration in.** Paste a social link in the Saved tab — Gemini video understanding + metadata extraction pull out the places, resolved against Google Places.
-2. **Plan in chat.** LangGraph agent asks smart follow-up questions (native `interrupt()` cards), searches the web in parallel, and builds a day-by-day itinerary with photos, ratings, and routes.
-3. **Bookings from Gmail.** One click connects Gmail (OAuth, encrypted tokens); confirmation emails are parsed and merged into your trip automatically.
-4. **Onto your Calendar.** The agent creates Google Calendar events for flights, hotels, and activities.
-5. **Actually book it.** `search_flights` + `book_flight` tools hit the Duffel API — real order creation with a booking reference (test mode: no money moves, real orders).
+1. **Inspiration in.** Paste a social link in the Saved tab — a tiered cascade pulls places out: caption metadata first, then Gemini video understanding reads on-screen text and spoken names, with an Apify fallback when platforms block access.
+2. **Plan in chat.** A LangGraph agent asks smart follow-ups through native `interrupt()` cards, fans out web searches in parallel, and builds a day-by-day itinerary with photos, ratings, and routes.
+3. **Reality in.** One click connects Gmail — confirmation emails are parsed and merged into the trip. Itinerary items become Google Calendar events.
+4. **Booked.** `search_flights` + `book_flight` tools hit the Duffel API: real offer search, real order creation, real booking reference (test mode — real infrastructure, no money moves).
 
 ## External apps connected
 
 | App | What the agent does with it |
 |---|---|
-| **Instagram / TikTok / YouTube** | Ingests shared links, extracts places from video + audio + captions |
+| **Instagram / TikTok / YouTube** | Ingests shared links; extracts places from video frames, audio, and captions |
 | **Google Gemini** | Video understanding — reads on-screen text and spoken place names |
-| **Google Places** | Resolves every candidate to a real placeId, rating, photos, coordinates |
+| **Google Places** | Resolves every candidate to a real placeId with rating, photos, coordinates |
 | **Gmail** | OAuth connect → finds flight/hotel confirmations → merges into trips |
 | **Google Calendar** | Creates itinerary events with times and locations |
-| **Duffel** | Searches live flight offers and creates real bookings (test mode) |
-| **OpenAI** | Agent reasoning, extraction, Whisper transcription fallback |
+| **Duffel** | Live flight offer search → real order creation with booking reference |
+| **OpenAI** | Agent reasoning, place extraction, Whisper transcription fallback |
 | **Tavily** | Parallel web search during planning |
 
-Plus OpenTripMap, Geoapify, SerpApi, and OpenWeather for places/routes/hotels/weather.
+Plus OpenTripMap, Geoapify, SerpApi, and OpenWeather for places, routes, hotels, and weather — **12+ external services orchestrated by one agent**.
+
+## Observability & evaluation
+
+This is the part most hackathon agents skip — we built it in:
+
+- **LangSmith tracing** — every agent run, tool call, and LLM call is traced end-to-end (`langsmith_tracing` + `langsmith_project`). You can open any conversation and see exactly what the agent did, in what order, and what it cost.
+- **80-case eval benchmark** (`backend-python/tests/eval/`) — multi-turn scripted conversations across categories (chitchat, planning, edits, edge cases), scored by LLM-as-judge evaluators, runnable as a CLI: `python -m tests.eval.run_evals --category planning`.
+- **LangSmith datasets** — the benchmark uploads as a LangSmith dataset and runs through `langsmith.evaluate()` (`tests/eval/langsmith_eval.py`), so experiments are comparable run-over-run.
+
+## Reliability & testing
+
+```bash
+cd backend-python && pytest                      # 130 backend tests
+cd frontend && npm test                          # 40 frontend tests
+cd frontend && npm run build                     # production build
+cd backend-python && python -m tests.eval.run_evals   # 80-case agent benchmark
+```
+
+Verified end-to-end, not just unit-tested:
+
+- **OAuth**: Google sign-in completes a real PKCE flow — the `code_verifier` round-trips through a signed JWT state token; Gmail and Calendar grants merge incrementally without clobbering each other.
+- **Agent state**: the LangGraph Postgres checkpointer is the source of truth — pending questions survive page reloads, manual itinerary edits and Gmail imports sync back into the checkpoint, concurrent sends return a clean 409.
+- **Link import**: verified against real Instagram reels — caption-rich links resolve via metadata alone; caption-sparse videos escalate to Gemini video understanding; results dedupe against existing saved places.
+- **Booking**: a real Duffel Airways test order was created and returned a live booking reference (`ord_0000BANcAJzbUvwMotBqG8` / PNR `EMDGNJ`).
+- **Streaming**: Redis-buffered token streams replay after refresh/disconnect mid-turn.
 
 ## Setup
 
@@ -58,49 +93,36 @@ JWT_SECRET=...
 GOOGLE_PLACES_API_KEY=...
 
 # Optional integrations
-GOOGLE_CLIENT_ID=...              # sign-in + Gmail + Calendar OAuth
+GOOGLE_CLIENT_ID=...                # sign-in + Gmail + Calendar OAuth
 GOOGLE_CLIENT_SECRET=...
-GOOGLE_VIDEO_UNDERSTANDING_KEY=... # Gemini — link import video tier
+GOOGLE_VIDEO_UNDERSTANDING_KEY=...  # Gemini — link import video tier
 DUFFEL_ACCESS_TOKEN=duffel_test_... # flight search + booking (free test token)
-APIFY_TOKEN=...                   # optional scraper fallback
+APIFY_TOKEN=...                     # optional scraper fallback
+LANGSMITH_API_KEY=...               # tracing + eval datasets
+LANGSMITH_TRACING=true
 ```
-
-## Reliability & testing
-
-```bash
-cd backend-python && pytest        # 109 backend tests
-cd frontend && npm test            # 40 frontend tests
-cd frontend && npm run build       # production build
-```
-
-Verified end-to-end, not just unit-tested:
-
-- **OAuth**: Google sign-in completes a real PKCE flow — the `code_verifier` round-trips through a signed JWT state token; Gmail and Calendar grants merge incrementally without clobbering each other.
-- **Agent state**: LangGraph Postgres checkpointer is the source of truth — pending questions survive page reloads, manual itinerary edits and Gmail imports sync back into the checkpoint, concurrent sends return a clean 409.
-- **Link import**: tested against real Instagram reels — caption-rich links resolve via metadata alone; caption-sparse videos escalate to Gemini video understanding; deduped against existing saved places.
-- **Booking**: a real Duffel Airways test order was created and returned a live booking reference (`ord_...` / PNR).
-- **Streaming**: Redis-buffered token streams replay after refresh/disconnect mid-turn.
 
 ## Architecture
 
 - **Backend**: FastAPI + Socket.IO + LangGraph + PostgreSQL (checkpointed agent state) + Redis (stream buffering)
 - **Frontend**: React 18 + Vite + Tailwind + Zustand
-- **Agent**: `create_agent` with `InjectedState` tools, `SummarizationMiddleware`, native `interrupt()`/`Command(resume)` for human-in-the-loop questions
-- **Link import**: tiered cascade — yt-dlp metadata → Gemini video understanding → Apify fallback → Places re-rank → `SavedItem`
+- **Agent**: `create_agent` with `InjectedState` tools, `SummarizationMiddleware`, native `interrupt()`/`Command(resume)` human-in-the-loop
+- **Link import**: yt-dlp metadata → Gemini video understanding → Apify fallback → Places top-3 re-rank → `SavedItem`
 
 ---
 
 ## Why TripWhat
 
-Most travel AI stops at suggestions. TripWhat takes actions. It doesn't just tell you about a place — it watches the reel you sent, files the places away, checks your inbox for the bookings you already made, puts events on your calendar, and books the flight. The loop from inspiration to reservation is the whole product.
+The travel-AI category is full of demos that stop at a bulleted list. TripWhat is the only one where the loop actually closes: the reel you scrolled past becomes saved places, the saved places become an itinerary, the itinerary becomes calendar events and a confirmed booking — and your real inbox bookings fold in along the way. Every step is a real API call to a real external system, and every step is observable in LangSmith.
 
 ## Why this is a strong fit for the Multi-App AI Agent Hackathon
 
-- **Eight external apps, one coherent agent.** Instagram/TikTok/YouTube, Gemini, Google Places, Gmail, Google Calendar, Duffel, OpenAI, Tavily — each one carries real weight in a single user story, not bolted on for a count.
-- **Real actions, not read-only demos.** The agent creates calendar events, merges email bookings into trip state, and creates actual Duffel orders with booking references — test mode is real infrastructure, not a mock.
-- **Production-grade engineering.** Durable agent state via LangGraph Postgres checkpointing, PKCE-secured OAuth with encrypted token storage and incremental scope merging, Redis-backed resumable streaming, bounded-concurrency enrichment, and checkpoint-synced manual edits.
+- **12+ external apps, one coherent story.** Instagram/TikTok/YouTube, Gemini, Places, Gmail, Calendar, Duffel, OpenAI, Tavily, OpenTripMap, Geoapify, SerpApi, OpenWeather — each carries real weight in a single user journey, not bolted on to hit a count.
+- **Real actions, not read-only demos.** The agent creates calendar events, merges email bookings into trip state, and creates actual Duffel orders with booking references. Test mode is real infrastructure — the same code path runs live with a production token.
+- **Evaluation is a feature, not an afterthought.** 170 automated tests, an 80-case LLM-judged benchmark, LangSmith datasets + `evaluate()` integration, and full trace observability on every agent run — the "show how you know it works" criterion has a concrete answer.
+- **Production-grade engineering.** Durable agent state via Postgres checkpointing, PKCE-secured OAuth with encrypted tokens and incremental scope merging, Redis-backed resumable streaming, bounded-concurrency enrichment, checkpoint-synced manual edits.
 - **Human-in-the-loop done right.** Questions suspend the graph via `interrupt()` and resume with `Command(resume)` — pending prompts survive reloads and multi-question chains.
-- **Evaluation surface.** 149 automated tests, plus every claim in this README was verified live: real reels imported, real OAuth consents completed, a real flight order created.
+- **Original mechanism.** The reel→places cascade (metadata → video understanding → scraper fallback → Places re-rank) is a genuinely novel pipeline for this category — inspiration ingestion is the unsolved edge of travel planning.
 
 ## What to look at in the code
 
@@ -109,6 +131,7 @@ Most travel AI stops at suggestions. TripWhat takes actions. It doesn't just tel
 - `backend-python/app/services/duffel_service.py` — flight search → real order creation
 - `backend-python/app/services/google_oauth.py` — encrypted tokens, incremental scopes, PKCE state
 - `backend-python/app/services/checkpoint_sync.py` — manual edits synced into live agent state
+- `backend-python/tests/eval/` — benchmark cases, LLM judges, LangSmith integration
 
 ## Team
 
