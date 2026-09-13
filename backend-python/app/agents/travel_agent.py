@@ -6,37 +6,120 @@ No fixed slot order, no interrupt-based route confirmation.
 """
 
 
+import re
+
 from langchain_openai import ChatOpenAI
 from langchain.agents import create_agent
 from langchain.agents.middleware import (
     ToolErrorMiddleware,
     ModelCallLimitMiddleware,
+    SummarizationMiddleware,
     wrap_model_call,
     ModelRequest,
     ModelResponse,
 )
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.types import Command, Interrupt
 
 from app.agents.prompts import DEEP_AGENT_SYSTEM_PROMPT
-from app.agents.state import create_default_trip_state
+from app.agents.state import create_default_trip_state, resolve_build_cities
 from app.agents.state_schema import TravelAgentState
 from app.agents.tools.plan_tools import plan_trip, ask_question
 from app.agents.tools.search_tools import web_search
 from app.agents.tools.itinerary_tools import build_itinerary, edit_itinerary
 from app.agents.tools.calendar_tools import create_calendar_event
+from app.agents.tools.gmail_tools import get_email_bookings, import_email_booking
 from app.agents.tools.memory_tools import remember_user_preference
 from app.agents.tools.mcp_tools import (
     mcp_search_places, mcp_resolve_names, mcp_compute_routes, mcp_lookup_weather, mcp_find_nearby,
     init_search_results, get_search_results,
 )
 from app.services.itinerary_builder import itinerary_builder
+from app.services import progress_bus
 from app.utils.logger import logger
 
 
 async def _aon_tool_error(exc: Exception) -> str:
     """Async error handler for ToolErrorMiddleware."""
     return f"Tool error: {type(exc).__name__}. Please try a different approach."
+
+
+# --- First-step tool forcing helpers -----------------------------------------
+# tool_choice="required" on the first model step keeps the model from asking
+# planning questions in plain text during onboarding — but applied blindly it
+# also forces a pointless tool call for "thanks!" or "what's the weather in
+# Paris?". These helpers exempt clearly-non-planning input.
+
+_CHITCHAT_RE = re.compile(
+    r"^\W*(hi+|hello|hey|yo|sup|thanks?|thank\s*you|thx|ty|ok(ay)?|k|cool|"
+    r"great|nice|perfect|awesome|amazing|sure|yes|yeah|yep|nope?|bye|"
+    r"good\s*bye|sounds\s+good|got\s+it|never\s*mind|lol|haha)\W*$",
+    re.IGNORECASE,
+)
+_PLANNING_HINT_RE = re.compile(
+    r"\b(trips?|travels?|travel(?:ing|ling)|vacations?|holidays?|itinerar\w*|"
+    r"plan(?:ning|ned)?s?|visit(?:ing)?|fly(?:ing)?|flights?|hotels?|weekend|"
+    r"getaway|honeymoon|road\s?trips?|backpack\w*|cruise|destinations?|"
+    r"sightseeing|beach(?:es)?|days?\s+in|weeks?\s+in|nights?\s+in)\b",
+    re.IGNORECASE,
+)
+
+
+def _requires_tool_call(text: str) -> bool:
+    """Whether a fresh user turn should force a tool call.
+
+    Keeps forcing for anything that could be trip planning (including answers
+    to our own questions typed as free text); skips it for greetings/acks and
+    for pure questions with no planning vocabulary.
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    if _CHITCHAT_RE.match(t):
+        return False
+    if "?" in t and not _PLANNING_HINT_RE.search(t):
+        return False
+    return True
+
+
+def _message_text(msg) -> str:
+    content = getattr(msg, "content", "")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            b.get("text", "") for b in content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    return str(content)
+
+
+def _is_interrupt_error(err) -> bool:
+    """True when a tool-call error slot actually holds pending Interrupts.
+
+    On an interrupted run, `call.error` carries the tuple of Interrupt objects
+    raised inside the tool — not a real failure.
+    """
+    if err is None:
+        return False
+    items = err if isinstance(err, (list, tuple)) else (err,)
+    return any(isinstance(e, Interrupt) or type(e).__name__ == "Interrupt" for e in items)
+
+
+def _interrupt_to_widget(intr) -> dict | None:
+    """Convert a pending LangGraph Interrupt into a question_card widget.
+
+    ask_question passes the raw card payload ({question, options, ...}) as the
+    interrupt value; the frontend widget shape wraps it as {type, data}.
+    """
+    payload = getattr(intr, "value", intr)
+    if isinstance(payload, dict):
+        if payload.get("type") == "question_card":
+            return payload
+        if payload.get("question"):
+            return {"type": "question_card", "data": payload}
+    return None
 
 
 class TravelAgent:
@@ -47,7 +130,6 @@ class TravelAgent:
         self.checkpointer = MemorySaver()
         self.store = None
         self._agent = None
-        self._model = None
         self._tools = [
             plan_trip,
             ask_question,
@@ -55,6 +137,8 @@ class TravelAgent:
             build_itinerary,
             edit_itinerary,
             create_calendar_event,
+            get_email_bookings,
+            import_email_booking,
             remember_user_preference,
             mcp_search_places,
             mcp_resolve_names,
@@ -76,42 +160,59 @@ class TravelAgent:
 
         @wrap_model_call
         async def dynamic_model_selection(request: ModelRequest, handler) -> ModelResponse:
-            """Route to the appropriate model + force tool calls during onboarding.
+            """Route to the appropriate model + inject prefs + force tool calls.
 
             - Use gpt-4o when no itinerary exists yet (stronger reasoning for
               parsing and flow decisions). Use gpt-4o-mini once the itinerary
               is built (cost-optimized for editing/chat).
-            - Force tool_choice="any" on the first LLM step of each turn when
-              we're still onboarding (no itinerary, missing dates or duration).
-              This prevents the model from asking planning questions in plain
-              text — it must call a tool (ask_question, plan_trip, web_search,
-              etc.) instead. After the first tool call, the model can respond
-              in text naturally.
+            - Append the user's prefs/memories to the system message via
+              request.override(system_message=...). The data arrives per-call
+              through astream_events(context=...) → request.runtime.context,
+              so it's always fresh and never persisted into checkpointed
+              message history.
+            - Force tool_choice="required" on the first LLM step of each turn
+              while onboarding (no itinerary) AND the input looks like
+              planning — this prevents the model from asking planning
+              questions in plain text. Clearly non-planning input
+              (greetings, info questions) is exempt so the model can simply
+              answer. After the first tool call, the model can respond in
+              text naturally.
             """
             trip_state = request.state.get("trip_state") or {}
             has_itinerary = bool(trip_state.get("itinerary"))
 
-            if not has_itinerary:
-                model = onboarding_model
-            else:
-                model = post_onboarding_model
+            model = onboarding_model if not has_itinerary else post_onboarding_model
+            overrides: dict = {"model": model}
 
-            # Check if we should force tool calls
-            overrides = {"model": model}
+            # --- Per-call prefs/memories via system_message override ---
+            run_ctx = getattr(request.runtime, "context", None) or {}
+            if isinstance(run_ctx, dict):
+                prefs_text = self._build_preferences_context(
+                    run_ctx.get("userPreferences"), run_ctx.get("userMemories")
+                )
+            else:
+                prefs_text = self._build_preferences_context(
+                    getattr(run_ctx, "userPreferences", None),
+                    getattr(run_ctx, "userMemories", None),
+                )
+            if prefs_text:
+                base_msg = request.system_message
+                base_text = base_msg.text if base_msg is not None else ""
+                overrides["system_message"] = SystemMessage(
+                    content=f"{base_text}\n\n{prefs_text}" if base_text else prefs_text
+                )
 
             if not has_itinerary:
                 # Onboarding mode — force tool calls on the first LLM step
-                # (latest message is a HumanMessage). This prevents the model
-                # from asking planning questions in plain text — it must call
-                # a tool (ask_question, plan_trip, web_search, etc.) instead.
-                # After the first tool call, the model can respond in text.
+                # (latest message is a HumanMessage) unless the input is
+                # clearly not planning (chitchat, info questions).
                 msgs = request.messages
                 is_first_step = (
                     len(msgs) > 0
                     and isinstance(msgs[-1], HumanMessage)
                 )
 
-                if is_first_step:
+                if is_first_step and _requires_tool_call(_message_text(msgs[-1])):
                     # OpenAI uses "required" to force a tool call.
                     # LangChain's "any" should map to this, but we use
                     # "required" directly to be safe.
@@ -122,6 +223,13 @@ class TravelAgent:
             return await handler(request.override(**overrides))
 
         return [
+            # Bounds checkpointed message history: summarize when the
+            # conversation gets long, keeping the most recent messages.
+            SummarizationMiddleware(
+                model=ChatOpenAI(model=self.model_name, temperature=0),
+                trigger=[("tokens", 8000), ("messages", 40)],
+                keep=("messages", 20),
+            ),
             dynamic_model_selection,
             ToolErrorMiddleware(aon_error=lambda exc, request: _aon_tool_error(exc)),
             ModelCallLimitMiddleware(run_limit=10),
@@ -141,12 +249,6 @@ class TravelAgent:
             )
         return self._agent
 
-    @property
-    def model(self):
-        if self._model is None:
-            self._model = ChatOpenAI(model=self.model_name, temperature=0)
-        return self._model
-
     # ------------------------------------------------------------------
     # Tool activity helpers — produce human-readable labels and result
     # summaries for the frontend's tool activity bar.
@@ -159,6 +261,8 @@ class TravelAgent:
         "build_itinerary": "Building itinerary",
         "edit_itinerary": "Editing itinerary",
         "create_calendar_event": "Adding calendar event",
+        "get_email_bookings": "Searching Gmail for bookings",
+        "import_email_booking": "Importing email booking",
         "remember_user_preference": "Saving your preference",
         "mcp_search_places": "Searching places",
         "mcp_resolve_names": "Resolving place names",
@@ -198,6 +302,8 @@ class TravelAgent:
             return f"Searching the web: {query}" if query else base
         elif tool_name == "plan_trip":
             dest = tool_input.get("destination") or ""
+            if isinstance(dest, list):
+                dest = ", ".join(str(d) for d in dest)
             return f"Planning trip to {dest}" if dest else base
         elif tool_name == "build_itinerary":
             city = tool_input.get("city") or ""
@@ -210,23 +316,53 @@ class TravelAgent:
         if output is None:
             return ""
 
-        # Tool outputs can be strings (most tools) or dicts (some MCP tools)
-        if isinstance(output, str):
-            text = output.strip()
-        elif isinstance(output, dict):
+        # Tool outputs can be strings (most tools), dicts (some MCP tools),
+        # or message-like objects (ToolMessage) with a .content attribute —
+        # which may itself be a list of content blocks (dicts like
+        # {"type": "text", "text": "..."} or objects with a .text attr).
+        # Extract the text instead of falling back to str(), which leaks
+        # reprs like "{'text': ...}" or "content=[TextContent(...)]".
+        raw = getattr(output, "content", output)
+        if isinstance(raw, dict) and isinstance(raw.get("text"), str):
+            raw = raw["text"]
+        if isinstance(raw, list):
+            parts: list[str] = []
+            for b in raw:
+                if isinstance(b, str):
+                    parts.append(b)
+                elif isinstance(b, dict) and isinstance(b.get("text"), str):
+                    parts.append(b["text"])
+                else:
+                    block_text = getattr(b, "text", None)
+                    if isinstance(block_text, str):
+                        parts.append(block_text)
+            raw = " ".join(p for p in parts if p)
+
+        if isinstance(raw, str):
+            text = raw.strip()
+        elif isinstance(raw, dict):
             # MCP search tools may return a dict with 'places' or 'results'
-            if "places" in output:
-                count = len(output["places"]) if isinstance(output["places"], list) else 0
+            if "places" in raw:
+                count = len(raw["places"]) if isinstance(raw["places"], list) else 0
                 return f"{count} places found"
-            if "results" in output:
-                count = len(output["results"]) if isinstance(output["results"], list) else 0
+            if "results" in raw:
+                count = len(raw["results"]) if isinstance(raw["results"], list) else 0
                 return f"{count} results found"
-            if "routes" in output:
-                count = len(output["routes"]) if isinstance(output["routes"], list) else 0
+            if "routes" in raw:
+                count = len(raw["routes"]) if isinstance(raw["routes"], list) else 0
                 return f"{count} routes found"
-            text = str(output)
+            text = str(raw)
+        elif isinstance(raw, (int, float, bool)):
+            text = str(raw)
         else:
-            text = str(output)
+            # Unrecognized object (Command, ToolMessage w/o text, etc.) — a
+            # repr like "Command(update={'trip_state': ...})" is never a
+            # useful summary. Show nothing rather than leaking it.
+            return ""
+
+        # Clean for one-line display: collapse newlines/extra whitespace and
+        # drop markdown emphasis markers that would render literally.
+        text = re.sub(r"\s+", " ", text).replace("**", "").replace("__", "").strip()
 
         # Try to extract a count from string output
         if "found" in text.lower():
@@ -244,17 +380,14 @@ class TravelAgent:
           - {"type": "widget", "widget": {...}} — widget to render (e.g., question_card)
           - {"type": "tripState", "tripState": {...}} — partial state update
           - {"type": "complete", "payload": {...}} — final result
+
+        HITL: ask_question suspends the run via langgraph.types.interrupt().
+        A pending interrupt in the checkpoint means `message` is the user's
+        answer — we resume the run with Command(resume=message) instead of
+        starting a new one.
         """
         context = context or {}
         trip_state = context.get("tripState")
-
-        messages = []
-        prefs_context = self._build_preferences_context(
-            context.get("userPreferences"), context.get("userMemories")
-        )
-        if prefs_context:
-            messages.append({"role": "system", "content": prefs_context})
-        messages.append({"role": "user", "content": message})
 
         logger.info(f"[AGENT_STREAM] Processing: {message!r} (conv={conversation_id})")
 
@@ -273,19 +406,78 @@ class TravelAgent:
                 "app": "tripwhat",
             },
         }
+        # Runtime context for middleware — user prefs/memories are appended to
+        # the system prompt per model call (see dynamic_model_selection), so
+        # they stay fresh and are never persisted into checkpointed history.
+        runtime_context = {
+            "userPreferences": context.get("userPreferences") or {},
+            "userMemories": context.get("userMemories") or [],
+        }
 
-        # Clear any stale _pendingWidget from the checkpoint state.
-        # The ask_question tool sets _pendingWidget in trip_state, which gets
-        # saved by the checkpointer. On the next turn, the checkpoint still has
-        # it — we need to explicitly null it out so the merge reducer overwrites
-        # the stale value. Otherwise the old question card reappears.
-        clean_trip_state = dict(final_trip_state)
-        clean_trip_state["_pendingWidget"] = None
+        # The Postgres checkpointer is the multi-turn source of truth for
+        # trip_state. Re-injecting the persisted conversation.trip_state
+        # wholesale would overwrite live checkpoint keys via the right-wins
+        # merge reducer (e.g. a stale cities=[] clobbering cities plan_trip
+        # just wrote — that emptied cities mid-flow once and crashed
+        # _build_widgets). Instead, seed ONLY keys the checkpoint lacks a
+        # meaningful value for (covers first turn / checkpoint reset / keys
+        # written externally, e.g. imported bookings).
+        #
+        # This state read ALSO detects a pending interrupt: if ask_question
+        # suspended the previous turn, the checkpoint holds the interrupt and
+        # this message is the user's answer → resume instead of a new run.
+        prior_ts: dict = {}
+        pending_interrupts: list = []
+        try:
+            existing_state = await self.agent.aget_state(config)
+            prior_ts = (existing_state.values or {}).get("trip_state") or {}
+            seen_ids: set = set()
+            candidates = list(getattr(existing_state, "interrupts", None) or ())
+            for task in getattr(existing_state, "tasks", None) or ():
+                candidates.extend(getattr(task, "interrupts", None) or ())
+            for intr in candidates:
+                iid = getattr(intr, "id", id(intr))
+                if iid not in seen_ids:
+                    seen_ids.add(iid)
+                    pending_interrupts.append(intr)
+        except Exception:
+            pass
+
+        if pending_interrupts:
+            # Resume the suspended run: the user's message becomes the return
+            # value of the interrupt() call inside ask_question (surfaced to
+            # the model as its ToolMessage). Do NOT inject a HumanMessage here —
+            # it would land between the AI tool_call message and its ToolMessage,
+            # which the OpenAI API rejects.
+            graph_input = Command(resume=message)
+            logger.info(f"[AGENT_STREAM] Resuming pending interrupt (conv={conversation_id})")
+        else:
+            clean_trip_state: dict = {}
+            for k, v in (final_trip_state or {}).items():
+                # _pendingWidget is a legacy key from the pre-interrupt design —
+                # never seed it; the checkpoint's pending interrupt is the state.
+                if k == "_pendingWidget":
+                    continue
+                if v not in (None, [], {}, "") and not prior_ts.get(k):
+                    clean_trip_state[k] = v
+            graph_input = {
+                "messages": [{"role": "user", "content": message}],
+                "trip_state": clean_trip_state,
+            }
+
+        # Progress bus — lets tool code (e.g. itinerary_builder running inside
+        # build_itinerary) push progress events that are merged into the yield
+        # loop below. get_stream_writer events are unreliable for async tools
+        # under astream_events(v3), so we use a plain queue instead.
+        bus_queue = progress_bus.register(conversation_id)
 
         try:
             stream = await self.agent.astream_events(
-                {"messages": messages, "trip_state": clean_trip_state},
-                config=config, version="v3"
+                graph_input,
+                config=config,
+                context=runtime_context,
+                version="v3",
+                durability="async",
             )
 
             # Consume messages and tool_calls concurrently.
@@ -328,13 +520,25 @@ class TravelAgent:
                         # Get final output and error
                         output = None
                         error = None
+                        summary = None
                         try:
                             output = call.output
                         except Exception as e:
                             error = str(e)
-                        if not error and hasattr(call, "error") and call.error:
-                            error = str(call.error)
-                        summary = self._tool_result_summary(call.tool_name, call.input if isinstance(call.input, dict) else None, output)
+                        call_error = getattr(call, "error", None)
+                        if not error and call_error:
+                            if _is_interrupt_error(call_error):
+                                # The tool suspended on an interrupt() — not a
+                                # failure; mark the activity row done.
+                                summary = "Waiting for your answer"
+                            else:
+                                error = str(call_error)
+                        if summary is None:
+                            summary = self._tool_result_summary(
+                                call.tool_name,
+                                call.input if isinstance(call.input, dict) else None,
+                                output,
+                            )
                         await event_queue.put({
                             "type": "tool_end",
                             "tool_name": call.tool_name,
@@ -346,72 +550,116 @@ class TravelAgent:
                 except Exception as e:
                     await event_queue.put({"type": "_error", "error": e})
 
-            # Run both consumers concurrently; we collect into a done flag
+            async def _consume_progress_bus():
+                """Forward tool-emitted progress events into the main queue."""
+                while True:
+                    bus_event = await bus_queue.get()
+                    if not isinstance(bus_event, dict) or bus_event.get("type") == "_bus_stop":
+                        return
+                    await event_queue.put(bus_event)
+
+            # Run both consumers concurrently; we collect into a done flag.
+            # The progress-bus forwarder runs until we push the stop sentinel.
             consumers = _aio.gather(_consume_messages(), _consume_tool_calls())
+            bus_consumer = _aio.create_task(_consume_progress_bus())
 
-            # Yield events from the queue as they arrive
-            while True:
+            async with stream:
                 try:
-                    event = await _aio.wait_for(event_queue.get(), timeout=0.1)
-                except _aio.TimeoutError:
-                    # Check if both consumers are done
-                    if consumers.done():
-                        # Drain any remaining events
-                        while not event_queue.empty():
-                            event = event_queue.get_nowait()
-                            if event.get("type") == "_error":
-                                raise event["error"]
-                            if event["type"] == "token":
-                                response_text += event["text"]
-                            yield event
-                        break
-                    continue
-                if event.get("type") == "_error":
-                    raise event["error"]
-                if event["type"] == "token":
-                    response_text += event["text"]
-                yield event
+                    # Yield events from the queue as they arrive
+                    while True:
+                        try:
+                            event = await _aio.wait_for(event_queue.get(), timeout=0.1)
+                        except _aio.TimeoutError:
+                            # Check if both consumers are done
+                            if consumers.done():
+                                # Drain any remaining events
+                                while not event_queue.empty():
+                                    event = event_queue.get_nowait()
+                                    if event.get("type") == "_error":
+                                        raise event["error"]
+                                    if event["type"] == "token":
+                                        response_text += event["text"]
+                                    yield event
+                                break
+                            continue
+                        if event.get("type") == "_error":
+                            raise event["error"]
+                        if event["type"] == "token":
+                            response_text += event["text"]
+                        yield event
 
-            # Await the gather to surface any exceptions
-            await consumers
+                    # Await the gather to surface any exceptions
+                    await consumers
+                finally:
+                    # Stop the progress-bus forwarder on ALL exit paths —
+                    # normal completion, errors and early generator close.
+                    bus_queue.put_nowait(progress_bus.STOP_EVENT)
+                    try:
+                        await _aio.wait_for(bus_consumer, timeout=1.0)
+                    except Exception:
+                        bus_consumer.cancel()
 
-            # Read the final state from the stream
-            final_output = await stream.output()
-            if final_output and isinstance(final_output, dict):
-                updated_trip_state = final_output.get("trip_state")
+                # Drain anything left behind
+                while not event_queue.empty():
+                    event = event_queue.get_nowait()
+                    if event.get("type") == "_error":
+                        raise event["error"]
+                    if event["type"] == "token":
+                        response_text += event["text"]
+                    yield event
+                while not bus_queue.empty():
+                    bus_event = bus_queue.get_nowait()
+                    if isinstance(bus_event, dict) and bus_event.get("type") != "_bus_stop":
+                        yield bus_event
+
+                # A suspended run ends with a pending interrupt — surface the
+                # ask_question payload as the question_card widget (same shape
+                # the old _pendingWidget channel produced, so the frontend is
+                # unchanged).
+                try:
+                    for intr in await stream.interrupts():
+                        pending_widget = _interrupt_to_widget(intr)
+                        if pending_widget:
+                            break
+                except Exception:
+                    pending_widget = None
+                if pending_widget:
+                    yield {"type": "widget", "widget": pending_widget}
+
+                # Read the authoritative final state from the checkpointer —
+                # stream.output() reflects the last step's output, which can lag
+                # the merged channel state (tool Command updates). aget_state
+                # returns the persisted checkpoint values.
+                try:
+                    final_snapshot = await self.agent.aget_state(config)
+                    updated_trip_state = (final_snapshot.values or {}).get("trip_state")
+                except Exception:
+                    updated_trip_state = None
+                if not updated_trip_state:
+                    final_output = await stream.output()
+                    if final_output and isinstance(final_output, dict):
+                        updated_trip_state = final_output.get("trip_state")
                 if updated_trip_state:
                     final_trip_state = updated_trip_state
 
         except Exception as e:
-            logger.error(f"[AGENT_STREAM] Streaming failed, falling back to invoke: {e}")
-            result = await self.agent.ainvoke(
-                {"messages": messages, "trip_state": final_trip_state},
-                config=config,
-            )
-            ai_messages = [m for m in result.get("messages", []) if m.type == "ai"]
-            for msg in reversed(ai_messages):
-                content = msg.content if isinstance(msg.content, str) else str(msg.content)
-                if content and content.strip():
-                    response_text = content.strip()
-                    break
-            if isinstance(result, dict):
-                updated_trip_state = result.get("trip_state")
-                if updated_trip_state:
-                    final_trip_state = updated_trip_state
+            # No ainvoke retry: re-running would re-append the user message to
+            # the checkpointed messages channel and re-pass a stale trip_state
+            # that clobbers live checkpoint keys. Propagate — _process_agent_stream
+            # emits a complete-with-error agent:response upstream.
+            logger.error(f"[AGENT_STREAM] Streaming failed: {e}")
+            raise
+        finally:
+            progress_bus.unregister(conversation_id)
 
-        # Emit pending widget (from ask_question tool) if present.
-        # Save it so we can also include it in the complete payload's widgets —
-        # this lets the frontend's processResponse know that this turn called
-        # ask_question, so it doesn't clear activeWidget prematurely.
-        pending_widget = final_trip_state.pop("_pendingWidget", None)
-        if pending_widget:
-            yield {"type": "widget", "widget": pending_widget}
-
-        if not response_text:
+        if not response_text and not pending_widget:
             response_text = "I apologize, but I had trouble processing your request."
 
-        # Auto-build itinerary when plan_trip has set a route but no itinerary yet
-        if final_trip_state.get("routeProposal") and not final_trip_state.get("itinerary"):
+        # Auto-build itinerary when plan_trip has set a route but no itinerary yet.
+        # Skip when a question is pending — the turn ends awaiting the user's
+        # answer; building now would stall the question card behind the build
+        # and produce an itinerary for input the user hasn't confirmed.
+        if final_trip_state.get("routeProposal") and not final_trip_state.get("itinerary") and not pending_widget:
             yield {"type": "status", "status": "Building your itinerary..."}
 
             import asyncio as _aio
@@ -419,78 +667,19 @@ class TravelAgent:
             _build_call_counter = [0]
 
             async def _build_status_cb(update: dict):
-                phase = update.get("phase", "")
-                msg = ""
-                if phase == "activities":
-                    city = update.get("city", "")
-                    msg = f"Finding activities in {city}..."
-                elif phase == "hotels_restaurants":
-                    cities = update.get("cities") or [update.get("city", "")]
-                    cities_str = ", ".join(c for c in cities if c)
-                    msg = f"Searching hotels & restaurants in {cities_str}..."
-                elif phase == "flights":
-                    msg = "Searching flights..."
-                elif phase == "day_complete":
-                    day_num = update.get("day", 0)
-                    city = update.get("city", "")
-                    total = update.get("totalDays", 0)
-                    msg = f"Day {day_num} of {total} ready in {city}"
-                    await status_queue.put({"type": "status", "status": msg})
-                    # Also emit as tool_start/tool_end so the activity bar shows it
-                    _build_call_counter[0] += 1
-                    call_id = f"build_day_{day_num}"
-                    await status_queue.put({
-                        "type": "tool_start",
-                        "tool_name": "itinerary_build_day",
-                        "label": f"Building Day {day_num} in {city}",
-                        "call_id": call_id,
-                        "input": {"day": day_num, "city": city},
-                    })
-                    await status_queue.put({
-                        "type": "tool_end",
-                        "tool_name": "itinerary_build_day",
-                        "label": f"Day {day_num} ready",
-                        "call_id": call_id,
-                        "summary": f"Day {day_num} of {total}",
-                        "error": None,
-                    })
-                    # Emit the day data as a new event type for progressive rendering
-                    await status_queue.put({
-                        "type": "itinerary_day",
-                        "day": update.get("day"),
-                        "city": update.get("city"),
-                        "timeSlots": update.get("timeSlots"),
-                        "totalDays": update.get("totalDays"),
-                    })
-                elif phase == "build_complete":
-                    msg = "Finalizing your itinerary..."
-                if msg:
-                    await status_queue.put({"type": "status", "status": msg})
-                    # Also emit as tool_start/tool_end so the activity bar shows it
-                    _build_call_counter[0] += 1
-                    call_id = f"build_{_build_call_counter[0]}"
-                    await status_queue.put({
-                        "type": "tool_start",
-                        "tool_name": f"itinerary_build_{phase}",
-                        "label": msg.rstrip("."),
-                        "call_id": call_id,
-                        "input": update,
-                    })
-                    await status_queue.put({
-                        "type": "tool_end",
-                        "tool_name": f"itinerary_build_{phase}",
-                        "label": msg.rstrip("."),
-                        "call_id": call_id,
-                        "summary": "",
-                        "error": None,
-                    })
+                # Shared translator handles both the lifecycle contract
+                # (state:"start"/"end" + task_id + group — parallel tasks show
+                # as running) and legacy phase-only updates (paired
+                # tool_start/tool_end emitted immediately).
+                for event in progress_bus.builder_update_events(update, _build_call_counter):
+                    await status_queue.put(event)
 
             build_task = _aio.create_task(
                 self._auto_build_itinerary(
                     final_trip_state,
                     status_cb=_build_status_cb,
                     user_memories=context.get("userMemories"),
-                    traveler_type=(trip_state or {}).get("travelers") if isinstance((trip_state or {}).get("travelers"), str) else None,
+                    traveler_type=self._traveler_type(final_trip_state),
                     user_interests=context.get("userInterests"),
                 )
             )
@@ -550,12 +739,28 @@ class TravelAgent:
                      "durable preference, save it with remember_user_preference.")
         return "\n".join(parts)
 
+    @staticmethod
+    def _destination_name(trip_state: dict) -> str:
+        """Best-effort destination label for widgets — cities first, then
+        routeProposal, then the itinerary's first day city."""
+        cities = trip_state.get("cities") or []
+        if cities:
+            return cities[0].get("name", "")
+        rp_cities = (trip_state.get("routeProposal") or {}).get("cities") or []
+        if rp_cities:
+            return rp_cities[0].get("name", "")
+        days = (trip_state.get("itinerary") or {}).get("days") or []
+        if days:
+            return days[0].get("city", "")
+        return ""
+
     def _build_widgets(self, trip_state: dict | None, search_results: list | None = None) -> list[dict]:
         """Build UI widgets based on current state."""
         widgets = []
+        trip_state = trip_state or {}
 
         # Show itinerary summary widget when itinerary is built
-        itinerary = (trip_state or {}).get("itinerary")
+        itinerary = trip_state.get("itinerary")
         if itinerary:
             hotels = itinerary.get("hotelRecommendations", [])
             best_hotel = hotels[0] if hotels else None
@@ -603,10 +808,10 @@ class TravelAgent:
                         "address": best_hotel.get("address", ""),
                     } if best_hotel else None,
                     "attractions": attractions,
-                    "destination": (trip_state or {}).get("cities", [{}])[0].get("name", ""),
-                    "duration": (trip_state or {}).get("duration", 0),
-                    "dates": (trip_state or {}).get("dates", {}),
-                    "preferences": (trip_state or {}).get("preferences", []),
+                    "destination": self._destination_name(trip_state),
+                    "duration": trip_state.get("duration", 0),
+                    "dates": trip_state.get("dates", {}),
+                    "preferences": trip_state.get("preferences", []),
                     "highlights": [
                         h for day in itinerary.get("days", [])[:4]
                         for h in (day.get("highlights") or [])[:2]
@@ -625,7 +830,7 @@ class TravelAgent:
 
         # Show search results widget when places were found via mcp_search_places
         # but no itinerary was built (i.e., search/recommendation turns).
-        if search_results and not (trip_state or {}).get("itinerary"):
+        if search_results and not trip_state.get("itinerary"):
             places = []
             seen_ids = set()
             for p in search_results:
@@ -652,32 +857,43 @@ class TravelAgent:
 
         return widgets
 
+    @staticmethod
+    def _traveler_type(trip_state: dict) -> str | None:
+        """Derive a traveler-type label from trip_state.travelers.
+
+        plan_trip writes travelers as a dict ({"adults": N, "children": M});
+        map it to the query-generator vocabulary (solo/couple/family/group).
+        Accepts a legacy plain string too.
+        """
+        t = (trip_state or {}).get("travelers")
+        if isinstance(t, str):
+            return t or None
+        if isinstance(t, dict):
+            adults = t.get("adults") or 1
+            children = t.get("children") or 0
+            if children:
+                return "family"
+            if adults >= 3:
+                return "group"
+            if adults == 2:
+                return "couple"
+            return "solo"
+        return None
+
     async def _auto_build_itinerary(self, trip_state: dict, status_cb=None, user_memories=None, traveler_type=None, user_interests=None) -> dict:
         """Auto-build itinerary directly using the itinerary builder service."""
-        route_proposal = trip_state.get("routeProposal")
-        cities = trip_state.get("cities", [])
-
-        if route_proposal and route_proposal.get("cities"):
-            build_cities = []
-            for i, c in enumerate(route_proposal["cities"]):
-                days = c["nights"] + 1 if i == 0 else c["nights"]
-                build_cities.append({"name": c["name"], "days": days})
-        elif cities:
-            build_cities = []
-            for i, c in enumerate(cities):
-                nights = c.get("nights", 1)
-                days = nights + 1 if i == 0 else nights
-                build_cities.append({"name": c["name"], "days": days})
-        else:
+        build_cities = resolve_build_cities(trip_state)
+        if not build_cities:
             return trip_state
 
+        total_days = sum(c["days"] for c in build_cities)
         ctx = {
             "destination": build_cities[0]["name"],
-            "duration": sum(c["days"] for c in build_cities),
+            "duration": total_days,
             "cities": build_cities,
-            "totalDays": sum(c["days"] for c in build_cities),
+            "totalDays": total_days,
             "travelType": trip_state.get("pace", "moderate"),
-            "numberOfPeople": (trip_state.get("travelers") or {}).get("adults", 1),
+            "numberOfPeople": (trip_state.get("travelers") if isinstance(trip_state.get("travelers"), dict) else {}).get("adults", 1),
             "preferences": trip_state.get("preferences", []),
             "tripStyle": trip_state.get("tripStyle", "balanced"),
             "helpWith": trip_state.get("helpWith", []),

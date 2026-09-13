@@ -15,6 +15,7 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models import Conversation, User
 from app.services.itinerary_editor import itinerary_editor
+from app.services.checkpoint_sync import sync_trip_state_to_checkpoint
 from app.services.google_places import google_places
 from app.schemas.itinerary import Activity, ActivityLocation
 from app.utils.logger import logger
@@ -78,11 +79,29 @@ async def _get_conversation_state(db: AsyncSession, conversation_id: str, user: 
     return conversation, conversation.trip_state or {}
 
 
+async def _sync_itinerary_to_checkpoint(conversation_id: str, itinerary: dict | None):
+    """Push a manual itinerary edit into the LangGraph checkpoint.
+
+    The Postgres checkpointer (thread_id = conversation_id) is the source of
+    truth for the agent's trip_state — chat_stream only seeds keys the
+    checkpoint lacks, so without this the next edit_itinerary tool call would
+    read the pre-edit itinerary and clobber the user's manual edits on
+    write-back. Only the "itinerary" key is pushed — the shallow right-wins
+    merge reducer leaves everything else untouched.
+    """
+    await sync_trip_state_to_checkpoint(
+        conversation_id, {"itinerary": itinerary} if itinerary is not None else None
+    )
+
+
 async def _save_state(db: AsyncSession, conversation, trip_state: dict):
-    """Save trip_state back to conversation."""
+    """Save trip_state back to conversation + sync itinerary to the checkpoint."""
     conversation.trip_state = trip_state
     flag_modified(conversation, "trip_state")
     await db.commit()
+    await _sync_itinerary_to_checkpoint(
+        conversation.conversation_id, trip_state.get("itinerary")
+    )
 
 
 # --- Endpoints ---

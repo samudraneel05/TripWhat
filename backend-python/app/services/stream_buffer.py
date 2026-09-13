@@ -82,25 +82,43 @@ class StreamBuffer:
 
     # --- Read operations ---
 
-    async def read_events(self, conv_id: str, after_id: str = "0", count: int = 100) -> list[dict]:
+    # Safety cap on total events returned by one replay call.
+    MAX_REPLAY_EVENTS = 2000
+
+    async def read_events(self, conv_id: str, after_id: str = "0", count: int = 500) -> list[dict]:
         """Read events from the stream after a given entry ID.
 
         Returns list of {id, type, data, timestamp}.
         Use after_id="0" to get all events.
+
+        Paginates internally — a single xread is capped at `count` entries,
+        but streams accumulate hundreds of token events per turn, so we keep
+        reading until the stream is exhausted (or MAX_REPLAY_EVENTS hit).
         """
         try:
             r = await self._get_redis()
-            entries = await r.xread({self._stream_key(conv_id): after_id}, count=count)
-            events = []
-            for stream_key, stream_entries in entries:
-                for entry_id, fields in stream_entries:
-                    events.append({
-                        "id": entry_id,
-                        "type": fields.get("type", ""),
-                        "data": json.loads(fields.get("data", "{}")),
-                        "timestamp": fields.get("ts", ""),
-                    })
-            return events
+            events: list[dict] = []
+            last_id = after_id
+            while len(events) < self.MAX_REPLAY_EVENTS:
+                entries = await r.xread(
+                    {self._stream_key(conv_id): last_id}, count=count
+                )
+                batch = []
+                for _stream_key, stream_entries in entries:
+                    for entry_id, fields in stream_entries:
+                        batch.append({
+                            "id": entry_id,
+                            "type": fields.get("type", ""),
+                            "data": json.loads(fields.get("data", "{}")),
+                            "timestamp": fields.get("ts", ""),
+                        })
+                if not batch:
+                    break
+                events.extend(batch)
+                last_id = batch[-1]["id"]
+                if len(batch) < count:
+                    break  # stream exhausted
+            return events[: self.MAX_REPLAY_EVENTS]
         except Exception as e:
             logger.warning(f"[STREAM_BUFFER] Failed to read events for {conv_id}: {e}")
             return []

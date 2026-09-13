@@ -16,7 +16,9 @@ class Conversation(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     messages: Mapped[list | None] = mapped_column(PortableJSON, nullable=True, default=list)
     meta: Mapped[dict | None] = mapped_column("metadata", PortableJSON, nullable=True, default=dict)
-    itinerary: Mapped[dict | None] = mapped_column(PortableJSON, nullable=True)
+    # NOTE: the legacy `itinerary` column still exists in the DB but is no
+    # longer mapped — it had zero readers/writers (itinerary lives inside
+    # trip_state["itinerary"]). Left un-migrated intentionally.
     trip_state: Mapped[dict | None] = mapped_column(PortableJSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc).replace(tzinfo=None))
     updated_at: Mapped[datetime] = mapped_column(default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), onupdate=lambda: datetime.now(timezone.utc).replace(tzinfo=None))

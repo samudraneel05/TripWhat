@@ -12,19 +12,24 @@ import re
 
 
 class TripState(TypedDict, total=False):
-    tripId: Optional[str]
+    # NOTE: `status` and `version` are write-only today (no reader in backend or
+    # frontend code), but both are required fields in the frontend TripState
+    # contract (frontend/src/stores/tripStore.ts) and are persisted/transmitted
+    # with the state — keep them unless the wire contract is cleaned up too.
+    # `pace` is read (ctx.travelType) but never written, so it always resolves
+    # to the default "moderate" — kept as a future hook for a pace input.
     status: str  # planning | upcoming | completed | archived
-    cities: list[dict]
+    cities: list[dict]  # user-declared destinations (name/order); canonical for display + edit destination
     dates: Optional[dict]
     duration: Optional[int]
     travelers: Optional[dict]
-    budget: Optional[dict]
     preferences: Optional[list[str]]
     pace: Optional[str]
     tripStyle: Optional[str]
     helpWith: Optional[list[str]]
     itinerary: Optional[dict]
-    routeProposal: Optional[dict]
+    routeProposal: Optional[dict]  # canonical for per-city nights/order at itinerary-build time
+    bookings: Optional[list[dict]]  # parsed email booking confirmations
     startLocation: Optional[str]
     travelMode: Optional[str]  # walking | driving | transit (intra-city default: walking)
     version: int
@@ -190,3 +195,27 @@ def distribute_nights(trip_state: dict, duration: int) -> None:
     remainder = total_nights - nights_per * len(cities)
     if remainder > 0:
         cities[0]["nights"] = cities[0].get("nights", 0) + remainder
+
+
+def resolve_build_cities(trip_state: dict) -> list[dict]:
+    """Derive the [{"name", "days"}] list the itinerary builder consumes.
+
+    Canonical source: routeProposal.cities (LLM-proposed night splits and
+    visit order). Falls back to trip_state.cities (user-declared list, with
+    nights from distribute_nights) when no proposal exists.
+
+    Convention: the first city gets nights+1 days (arrival day counts);
+    subsequent cities get exactly their nights in days.
+    """
+    route_proposal = trip_state.get("routeProposal")
+    cities = trip_state.get("cities") or []
+
+    if route_proposal and route_proposal.get("cities"):
+        return [
+            {"name": c["name"], "days": c["nights"] + 1 if i == 0 else c["nights"]}
+            for i, c in enumerate(route_proposal["cities"])
+        ]
+    return [
+        {"name": c["name"], "days": c.get("nights", 1) + 1 if i == 0 else c.get("nights", 1)}
+        for i, c in enumerate(cities)
+    ]

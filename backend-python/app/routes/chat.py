@@ -21,6 +21,49 @@ router = APIRouter()
 # Cap persisted conversation history to keep the JSONB column bounded
 MAX_CONVERSATION_MESSAGES = 100
 
+# Per-conversation stream guard — one in-flight agent run per thread_id.
+# Two rapid send_message calls must not spawn two concurrent graph runs on the
+# same checkpoint thread. In-process set is race-free (check+add with no await
+# between); the Redis stream_buffer "active" flag is a cross-process backstop.
+_active_conversations: set[str] = set()
+
+# Strong refs for background stream tasks — asyncio.create_task results must
+# be held or the task can be garbage-collected mid-run.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _interrupt_to_widget(intr) -> dict | None:
+    """Convert a pending LangGraph Interrupt into a question_card widget."""
+    payload = getattr(intr, "value", intr)
+    if isinstance(payload, dict):
+        if payload.get("type") == "question_card":
+            return payload
+        if payload.get("question"):
+            return {"type": "question_card", "data": payload}
+    return None
+
+
+async def _pending_widget_for(conversation_id: str) -> dict | None:
+    """Read the conversation's checkpoint for a pending ask_question interrupt.
+
+    Returns the question_card widget to surface in the UI, or None.
+    """
+    try:
+        from app.agents.travel_agent import travel_agent
+
+        config = {"configurable": {"thread_id": conversation_id}}
+        state = await travel_agent.agent.aget_state(config)
+        candidates = list(getattr(state, "interrupts", None) or ())
+        for task in getattr(state, "tasks", None) or ():
+            candidates.extend(getattr(task, "interrupts", None) or ())
+        for intr in candidates:
+            widget = _interrupt_to_widget(intr)
+            if widget:
+                return widget
+    except Exception as e:
+        logger.warning(f"[CHAT] pending-interrupt lookup failed for {conversation_id}: {e}")
+    return None
+
 
 def _sanitize_json(obj):
     """Recursively convert non-JSON-serializable values (datetime, etc.) to strings."""
@@ -51,6 +94,28 @@ async def send_message(
 
     conv_id = req.conversationId or str(uuid.uuid4())
 
+    # Concurrency guard — one in-flight agent run per conversation. The
+    # check+add is atomic (no await between) so two rapid requests can't both
+    # spawn a graph run on the same checkpoint thread. Must happen BEFORE we
+    # persist the user message so a rejected send doesn't linger unanswered.
+    if conv_id in _active_conversations or await stream_buffer.is_active(conv_id):
+        raise HTTPException(
+            status_code=409,
+            detail="A response is already being generated for this conversation",
+        )
+    _active_conversations.add(conv_id)
+
+    try:
+        return await _start_stream(req, conv_id, user, db)
+    except Exception:
+        # Anything failing before the background task takes over must release
+        # the guard or this conversation stays locked forever.
+        _active_conversations.discard(conv_id)
+        raise
+
+
+async def _start_stream(req, conv_id: str, user, db: AsyncSession):
+    """Persist the user message and launch the background agent stream."""
     result = await db.execute(select(Conversation).where(Conversation.conversation_id == conv_id))
     conversation = result.scalar_one_or_none()
 
@@ -59,58 +124,59 @@ async def send_message(
             conversation_id=conv_id,
             user_id=user.id,
             messages=[],
-            meta={"userPreferences": user.preferences or {}},
+            meta={},
         )
         db.add(conversation)
         await db.commit()
         await db.refresh(conversation)
 
     messages = list(conversation.messages or [])
-    messages.append({
+
+    # If the previous assistant turn ended on a question_card widget, this
+    # user message is the answer to that question — mark it so reopened
+    # chats can rebuild the completed-question row.
+    answered_question = None
+    if messages:
+        last_msg = messages[-1]
+        if last_msg.get("role") == "assistant":
+            for w in last_msg.get("widgets") or []:
+                if isinstance(w, dict) and w.get("type") == "question_card":
+                    answered_question = (w.get("data") or {}).get("question")
+                    break
+
+    user_msg = {
         "role": "user",
         "content": req.message,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+    if answered_question:
+        user_msg["answeredQuestion"] = answered_question
+    messages.append(user_msg)
     conversation.messages = messages[-MAX_CONVERSATION_MESSAGES:]
     flag_modified(conversation, "messages")
 
     await db.commit()
 
-    # Build history
-    history = [f"{m['role']}: {m['content']}" for m in messages[-8:]]
-
     # Load long-term user memories (LangGraph store) for personalization
     memories = await get_user_memories(user.id)
 
-    # Inject home city (from preferences or memories) so the agent can
-    # auto-fill the origin when flights are in scope.
-    prefs = user.preferences or {}
-    home_city = prefs.get("homeCity") or prefs.get("home_city")
-    if not home_city:
-        for m in memories:
-            ml = (m or "").lower()
-            if "home_city" in ml or "home city" in ml or "home airport" in ml:
-                parts = m.split(":", 1)
-                if len(parts) == 2:
-                    home_city = parts[1].strip()
-                    break
-
     agent_context = {
         "tripState": conversation.trip_state,
-        "history": history,
         "userId": user.id,
         "userPreferences": user.preferences or {},
         "userMemories": memories,
-        "homeCity": home_city,
     }
 
     logger.info(f"Processing (streaming): {req.message!r}")
 
-    # Mark stream as active and launch background task
+    # Mark stream as active and launch background task (strong-ref'd so it
+    # can't be GC'd mid-run; removed from the guard set in its finally).
     await stream_buffer.mark_active(conv_id)
-    asyncio.create_task(_process_agent_stream(
+    task = asyncio.create_task(_process_agent_stream(
         conv_id, req.message, agent_context, user.id
     ))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
     return {
         "conversationId": conv_id,
@@ -131,6 +197,10 @@ async def _process_agent_stream(
     """
     from app.agents.travel_agent import travel_agent
     from app.main import sio
+
+    # Tool activities for this turn, keyed by call_id — persisted on the
+    # assistant message so the collapsed ToolActivityBar survives reloads.
+    tool_activities: dict[str, dict] = {}
 
     try:
         async for event in travel_agent.chat_stream(message, conv_id, agent_context):
@@ -157,6 +227,14 @@ async def _process_agent_stream(
                     "label": event.get("label", ""),
                     "callId": event.get("call_id", ""),
                     "input": event.get("input"),
+                    "group": event.get("group"),
+                }
+                tool_activities[payload["callId"]] = {
+                    "callId": payload["callId"],
+                    "toolName": payload["toolName"],
+                    "label": payload["label"],
+                    "status": "running",
+                    "group": payload["group"],
                 }
                 eid = await stream_buffer.push_event(conv_id, "tool_start", payload)
                 payload["eventId"] = eid
@@ -170,7 +248,19 @@ async def _process_agent_stream(
                     "callId": event.get("call_id", ""),
                     "summary": event.get("summary", ""),
                     "error": event.get("error"),
+                    "group": event.get("group"),
                 }
+                act = tool_activities.get(payload["callId"])
+                if act is None:
+                    act = tool_activities[payload["callId"]] = {
+                        "callId": payload["callId"],
+                        "toolName": payload["toolName"],
+                        "label": payload["label"],
+                        "group": payload["group"],
+                    }
+                act["status"] = "error" if payload["error"] else "finished"
+                act["summary"] = payload["summary"]
+                act["error"] = payload["error"]
                 eid = await stream_buffer.push_event(conv_id, "tool_end", payload)
                 payload["eventId"] = eid
                 await sio.emit("agent:tool_end", payload, room=conv_id)
@@ -216,11 +306,21 @@ async def _process_agent_stream(
                     conversation = result.scalar_one_or_none()
                     if conversation:
                         msgs = list(conversation.messages or [])
-                        msgs.append({
+                        assistant_msg = {
                             "role": "assistant",
                             "content": ai_response,
                             "timestamp": datetime.now(timezone.utc).isoformat(),
-                        })
+                        }
+                        # Persist widgets + tool activities + suggestions so a
+                        # reopened chat can fully restore the turn's UI.
+                        if payload.get("widgets"):
+                            assistant_msg["widgets"] = _sanitize_json(payload["widgets"])
+                        activities = list(tool_activities.values())
+                        if activities:
+                            assistant_msg["toolActivities"] = _sanitize_json(activities)
+                        if payload.get("suggestions"):
+                            assistant_msg["suggestions"] = payload["suggestions"]
+                        msgs.append(assistant_msg)
                         conversation.messages = msgs[-MAX_CONVERSATION_MESSAGES:]
                         flag_modified(conversation, "messages")
 
@@ -262,6 +362,7 @@ async def _process_agent_stream(
         await sio.emit("agent:response", error_payload, room=conv_id)
 
     finally:
+        _active_conversations.discard(conv_id)
         await stream_buffer.mark_done(conv_id)
 
 
@@ -277,10 +378,37 @@ async def get_conversation(
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    # If the graph checkpoint holds a pending interrupt (ask_question awaiting
+    # an answer), surface the question payload so the reopened chat re-arms
+    # the QuestionCard — parity with the pending-widget restore that used to
+    # read _pendingWidget out of trip_state.
+    pending_widget = await _pending_widget_for(conversation_id)
+
+    messages = list(conversation.messages or [])
+    if pending_widget:
+        # The interrupt usually already persisted as a question_card widget on
+        # the trailing assistant message. If it's missing (old rows, failed
+        # persist), inject it so buildChatRestore picks it up naturally.
+        if messages and messages[-1].get("role") == "assistant":
+            widgets = list(messages[-1].get("widgets") or [])
+            if not any(
+                isinstance(w, dict) and w.get("type") == "question_card"
+                for w in widgets
+            ):
+                messages[-1] = {**messages[-1], "widgets": widgets + [pending_widget]}
+        else:
+            messages.append({
+                "role": "assistant",
+                "content": "",
+                "widgets": [pending_widget],
+                "timestamp": None,
+            })
+
     return {
         "conversationId": conversation.conversation_id,
-        "messages": conversation.messages or [],
+        "messages": messages,
         "metadata": conversation.meta,
+        "pendingWidget": pending_widget,
         "createdAt": conversation.created_at.isoformat() if conversation.created_at else None,
         "updatedAt": conversation.updated_at.isoformat() if conversation.updated_at else None,
     }
@@ -321,4 +449,17 @@ async def delete_conversation(
     await db.delete(conversation)
     await db.commit()
     await stream_buffer.clear_stream(conversation_id)
+
+    # Delete the LangGraph checkpoint thread too — otherwise checkpoint/
+    # writes rows for this thread_id orphan forever.
+    try:
+        from app.agents.travel_agent import travel_agent
+
+        checkpointer = getattr(travel_agent, "checkpointer", None)
+        adelete = getattr(checkpointer, "adelete_thread", None)
+        if adelete:
+            await adelete(conversation_id)
+    except Exception as e:
+        logger.warning(f"[CHAT] checkpoint cleanup failed for {conversation_id}: {e}")
+
     return {"message": "Conversation deleted successfully"}

@@ -9,6 +9,8 @@ from app.database import get_db
 from app.deps import get_current_user
 from app.models import Trip, User
 from app.schemas.trip import CreateTripRequest, UpdateTripRequest, MarkUpcomingRequest
+from app.services.checkpoint_sync import sync_trip_state_to_checkpoint
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -290,6 +292,7 @@ async def update_trip(
         raise HTTPException(status_code=404, detail="Saved trip not found")
 
     data = req.model_dump(exclude_unset=True)
+    new_trip_state = None
     for key, value in data.items():
         if key == "startDate" and value:
             trip.start_date = _parse_iso(value)
@@ -299,6 +302,7 @@ async def update_trip(
             trip.budget = value
         elif key == "tripState":
             trip.trip_state = value
+            new_trip_state = value
             # Auto-update trip dates from tripState
             if isinstance(value, dict):
                 dates = value.get("dates")
@@ -321,8 +325,64 @@ async def update_trip(
             setattr(trip, key, value)
 
     await db.commit()
+    # If the saved trip is linked to a conversation, keep the LangGraph
+    # checkpoint in lockstep — otherwise the next agent turn reads the
+    # pre-edit state and clobbers this update on write-back. Canonical keys
+    # absent from the snapshot are nulled so stale checkpoint values (e.g.
+    # an old routeProposal after cities changed) don't linger — the merge
+    # reducer is right-wins per key, so None clears them.
+    if new_trip_state and isinstance(new_trip_state, dict) and trip.conversation_id:
+        known_keys = (
+            "status", "cities", "dates", "duration", "travelers", "preferences",
+            "pace", "tripStyle", "helpWith", "itinerary", "routeProposal",
+            "bookings", "startLocation", "travelMode", "version",
+        )
+        sync_update = dict(new_trip_state)
+        for k in known_keys:
+            sync_update.setdefault(k, None)
+        await sync_trip_state_to_checkpoint(trip.conversation_id, sync_update)
     await db.refresh(trip)
     return {"message": "Trip updated successfully", "savedTrip": _trip_to_dict(trip)}
+
+
+class ImportBookingRequest(BaseModel):
+    booking: dict
+
+
+@router.post("/{trip_id}/import-booking")
+async def import_booking(
+    trip_id: int,
+    req: ImportBookingRequest,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Import a parsed Gmail booking into this trip's itinerary state."""
+    result = await db.execute(select(Trip).where(Trip.id == trip_id, Trip.user_id == user.id))
+    trip = result.scalar_one_or_none()
+    if not trip:
+        raise HTTPException(status_code=404, detail="Saved trip not found")
+
+    if not isinstance(req.booking, dict) or not req.booking.get("id"):
+        raise HTTPException(status_code=400, detail="booking object with an id is required")
+
+    from app.services.booking_import import merge_booking_into_trip_state
+
+    # merge_booking_into_trip_state returns a partial update (bookings +
+    # itinerary only) — merge it into the trip's existing state.
+    update, message = merge_booking_into_trip_state(trip.trip_state or {}, req.booking)
+    new_state = dict(trip.trip_state or {})
+    new_state.update(update)
+    trip.trip_state = new_state
+    if update.get("itinerary"):
+        trip.generated_itinerary = update["itinerary"]
+
+    await db.commit()
+    # Sync the merged bookings/itinerary into the linked conversation's
+    # checkpoint so the agent sees the imported booking on the next turn.
+    if trip.conversation_id:
+        await sync_trip_state_to_checkpoint(trip.conversation_id, update)
+    await db.refresh(trip)
+    return {"message": message, "savedTrip": _trip_to_dict(trip), "tripState": trip.trip_state}
 
 
 @router.put("/{trip_id}/upcoming")

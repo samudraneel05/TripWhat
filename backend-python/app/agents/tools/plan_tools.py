@@ -2,157 +2,17 @@
 
 import json
 import re
-from datetime import datetime, timedelta
-from typing import Annotated, Any
+from typing import Annotated
 
 from langchain_core.tools import tool, InjectedToolCallId
 from langchain_core.messages import ToolMessage
 from langchain_openai import ChatOpenAI
 from langgraph.prebuilt import InjectedState
-from langgraph.types import Command
+from langgraph.types import Command, interrupt
 
 from app.agents.state import create_default_trip_state, normalize_dates, distribute_nights
+from app.services.llm_json import parse_json_robust
 from app.utils.logger import logger
-
-
-def _repair_json(text: str) -> str:
-    """Attempt to fix common LLM JSON mistakes (shared repair logic)."""
-    # Strip markdown code fences
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-    text = re.sub(r"\s*```\s*$", "", text)
-
-    # Replace smart quotes
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
-    text = text.replace("\u2018", "'").replace("\u2019", "'")
-
-    # Replace single-quoted strings with double-quoted
-    text = re.sub(r"([\[{,:])\s*'([^']*)'", r'\1 "\2"', text)
-    text = re.sub(r"'([^']*)'\s*([,\]}:])", r'"\1" \2', text)
-    text = re.sub(r"^\s*'([^']*)'", r'"\1"', text)
-    text = re.sub(r"'([^']*)'\s*$", r'"\1"', text)
-
-    # Quote unquoted property names
-    text = re.sub(r'([{,]\s*)([a-zA-Z_]\w*)\s*:', r'\1"\2":', text)
-
-    # Remove trailing commas
-    text = re.sub(r",\s*([}\]])", r"\1", text)
-
-    # Fix missing commas between items
-    text = re.sub(r'(["\d\w\]\}])\s*(\{["\[])', r'\1,\2', text)
-    # Fix missing comma between number/bool/null and a quoted property name
-    text = re.sub(r'(\b\d+|true|false|null)\s+(")', r'\1, \2', text)
-    # Fix missing comma between adjacent strings
-    text = re.sub(r'"\s+"', '", "', text)
-
-    return text
-
-
-def _parse_json_robust(text: str) -> dict | None:
-    """Parse JSON object from LLM output with repair attempts."""
-    # Attempt 1: direct parse
-    try:
-        result = json.loads(text)
-        return result if isinstance(result, dict) else None
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # Attempt 2: extract JSON object, then parse
-    match = re.search(r"\{[\s\S]*\}", text)
-    if match:
-        raw = match.group()
-        try:
-            result = json.loads(raw)
-            return result if isinstance(result, dict) else None
-        except json.JSONDecodeError:
-            # Attempt 3: repair and retry
-            repaired = _repair_json(raw)
-            try:
-                result = json.loads(repaired)
-                return result if isinstance(result, dict) else None
-            except json.JSONDecodeError:
-                # Attempt 4: extract again after repair
-                match2 = re.search(r"\{[\s\S]*\}", repaired)
-                if match2:
-                    try:
-                        result = json.loads(match2.group())
-                        return result if isinstance(result, dict) else None
-                    except json.JSONDecodeError:
-                        pass
-
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Month name → assumed concrete dates
-# ---------------------------------------------------------------------------
-
-_MONTHS = {
-    "january": 0, "february": 1, "march": 2, "april": 3, "may": 4, "june": 5,
-    "july": 6, "august": 7, "september": 8, "october": 9, "november": 10, "december": 11,
-    "jan": 0, "feb": 1, "mar": 2, "apr": 3, "jun": 5, "jul": 6, "aug": 7,
-    "sep": 8, "oct": 9, "nov": 10, "dec": 11,
-}
-
-
-def _assumed_dates_from_month(rough_month: str, duration: int | None = None) -> dict:
-    """Convert a rough month name (or 'Oct 2026') to assumed concrete dates.
-
-    Picks the first Friday of the next occurrence of that month, and an end
-    date = start + (duration-1) days. Falls back to a 7-day trip if duration
-    is unknown.
-    """
-    month_lower = (rough_month or "").lower().strip()
-    target_month: int | None = None
-    target_year: int | None = None
-
-    # Try "Oct 2026" or "October 2026" format
-    m = re.match(r"^([a-z]+)\s+(\d{4})$", month_lower)
-    if m:
-        month_name, year_str = m.group(1), m.group(2)
-        if month_name in _MONTHS:
-            target_month = _MONTHS[month_name]
-            target_year = int(year_str)
-
-    if target_month is None:
-        # Try "2026-10" format (YYYY-MM)
-        m = re.match(r"^(\d{4})-(\d{1,2})$", month_lower)
-        if m:
-            target_year = int(m.group(1))
-            target_month = int(m.group(2)) - 1
-        elif month_lower in _MONTHS:
-            target_month = _MONTHS[month_lower]
-        else:
-            # Try numeric month
-            try:
-                target_month = int(month_lower) - 1
-                if not 0 <= target_month <= 11:
-                    return {}
-            except (ValueError, TypeError):
-                return {}
-
-    today = datetime.today()
-    if target_year is None:
-        year = today.year
-        if target_month < today.month or (target_month == today.month and today.day > 15):
-            year += 1
-    else:
-        year = target_year
-
-    # First Friday of that month.
-    first_of_month = datetime(year, target_month + 1, 1)
-    days_until_friday = (4 - first_of_month.weekday()) % 7  # 4 = Friday
-    start = first_of_month + timedelta(days=days_until_friday)
-    if start < today:
-        start = start + timedelta(weeks=4)
-
-    dur = duration if duration and duration > 0 else 7
-    end = start + timedelta(days=dur - 1)
-    return {
-        "start": start.date().isoformat(),
-        "end": end.date().isoformat(),
-        "assumed": True,
-        "roughMonth": month_lower,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +54,10 @@ Respond with ONLY a JSON object with this exact structure:
         # Handle list-of-content-blocks format from OpenAI
         if isinstance(content, list):
             content = "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-        proposal = _parse_json_robust(content)
-        if not proposal:
-            raise ValueError("No JSON found")
+        proposal = parse_json_robust(content)
+        # parse_json_robust can return a list — route proposals must be objects
+        if not isinstance(proposal, dict):
+            raise ValueError("No JSON object found")
     except Exception as e:
         logger.error(f"[PLAN_TRIP] Route LLM failed: {e}")
         nights_per = max(1, total_nights // len(cities))
@@ -237,6 +98,7 @@ async def plan_trip(
     help_with: str | list[str] | None = None,
     origin: str | None = None,
     travel_mode: str | None = None,
+    pace: str | None = None,
     preferences: str = "",
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
@@ -258,6 +120,8 @@ async def plan_trip(
         origin: Where the user is flying from (only if flights are in scope)
         travel_mode: How the user plans to get around within cities —
                      "walking", "driving", or "transit" (default: walking)
+        pace: Schedule pace — "relaxed", "moderate", or "packed". Pass it when
+              the user expresses a pace preference (e.g. "slow-paced", "pack it in")
         preferences: Optional user preferences for route (e.g., "more nights in Tokyo")
 
     Normalizes parameters:
@@ -267,7 +131,9 @@ async def plan_trip(
     - Distributes nights across cities
 
     Generates route (city night splits) and stores in trip_state.
-    After this returns, call build_itinerary.
+    After this returns, call build_itinerary to generate the day-by-day
+    itinerary from the route. (chat_stream also auto-builds as a fallback
+    if you forget.)
     """
     trip_state = state.get("trip_state") or {}
     if not trip_state:
@@ -366,6 +232,16 @@ async def plan_trip(
         elif mode in ("transit", "public", "bus", "train"):
             trip_state["travelMode"] = "transit"
 
+    # --- Pace (schedule density) ---
+    if pace:
+        p = pace.lower().strip()
+        if p in ("relaxed", "slow", "easy", "leisurely", "chill", "slow-paced", "laid-back", "laid back"):
+            trip_state["pace"] = "relaxed"
+        elif p in ("packed", "fast", "intense", "busy", "ambitious", "fast-paced", "jam-packed"):
+            trip_state["pace"] = "packed"
+        elif p in ("moderate", "balanced", "medium", "normal"):
+            trip_state["pace"] = "moderate"
+
     # --- Route generation ---
     cities = trip_state.get("cities", [])
     total_nights = sum(c.get("nights", 0) for c in cities)
@@ -393,14 +269,22 @@ async def plan_trip(
         f"Route: {' → '.join(city_strs)}\n"
         f"Total: {sum(c.get('nights', 0) for c in (trip_state.get('routeProposal') or {}).get('cities', []))} nights\n"
         f"{dates_str}\n"
-        f"The route is ready. You MUST call build_itinerary NOW to generate "
-        f"the detailed day-by-day itinerary. Do NOT ask the user if they want "
-        f"to build it — just call build_itinerary immediately."
+        f"The route is ready. Next, call build_itinerary to generate the "
+        f"detailed day-by-day itinerary from this route, then briefly "
+        f"confirm the plan to the user."
     )
 
+    # Write back ONLY the keys this tool owns. The merge reducer is
+    # right-wins per key, so returning the whole snapshot would let stale
+    # values (e.g. an empty itinerary) clobber keys set by a parallel tool
+    # call in the same step.
+    owned_keys = (
+        "cities", "duration", "dates", "travelers", "tripStyle", "preferences",
+        "helpWith", "startLocation", "travelMode", "pace", "routeProposal", "version",
+    )
     return Command(
         update={
-            "trip_state": trip_state,
+            "trip_state": {k: trip_state[k] for k in owned_keys if k in trip_state},
             "messages": [ToolMessage(content=tool_msg, tool_call_id=tool_call_id)],
         },
     )
@@ -437,6 +321,7 @@ async def ask_question(
     - Who they're traveling with (travelers) → offer Solo/Couple/Family/Friends
     - What style of trip (trip_style) → offer Beaches/Culture/Adventure/Food/City
     - What they need help with (help_with) → multi-select: itinerary/flights/hotels
+    - Which cities/places to include in a route → multi-select city options
 
     If you find yourself typing a question like "When are you thinking of going?"
     or "How long do you want to stay?" — STOP and call this tool instead.
@@ -446,14 +331,18 @@ async def ask_question(
         options: List of selectable options, each {"label": "display text", "value": "machine value"}.
                  For dates, generate the next 12 months as options.
                  For duration, use natural options like [{"label": "Weekend", "value": 3}, {"label": "~1 week", "value": 7}].
-                 Include {"label": "Let Stardrift decide", "value": "you_decide"} when appropriate.
+                 Include {"label": "Let TripWhat decide", "value": "you_decide"} when appropriate.
                  Set to None for a pure free-text question.
         allow_custom: Show a "Type something else..." free text input (default True)
-        allow_multi_select: Allow selecting multiple options (e.g., "Select all that apply")
+        allow_multi_select: Allow selecting multiple options (e.g., "Select all that apply").
+                 Set True whenever the user may reasonably pick several options — which
+                 cities to visit, what they need help with, interests, etc.
         placeholder: Placeholder text for the free-text input
 
-    The user's answer will come back as a normal user message. Process it and
-    then call plan_trip, ask_question, or respond with natural text.
+    The user's answer is returned to you as this tool's result (the run
+    suspends on a native LangGraph interrupt until the user replies, then
+    resumes with their answer). Process it and then call plan_trip,
+    ask_question, or respond with natural text.
 
     You can also print natural text WITHOUT a widget — just respond normally
     without calling this tool. Mix natural text with questions as needed.
@@ -468,15 +357,17 @@ async def ask_question(
         "placeholder": placeholder or "Type something else...",
     }
 
-    # Store the widget in trip_state so chat_stream can emit it.
-    # We use a _pendingWidget field that chat_stream reads after the stream
-    # completes. (get_stream_writer() doesn't work reliably with astream_events
-    # v3 without a custom transformer — this is simpler.)
+    # Native HITL: suspend the graph here. chat_stream surfaces the payload as
+    # an agent:widget question_card; the next user message resumes the run via
+    # Command(resume=<answer>), which becomes this call's return value.
+    # (get_stream_writer() doesn't work reliably with astream_events v3 without
+    # a custom transformer — the interrupt payload IS the widget data.)
+    answer = interrupt(widget_data)
+
     return Command(
         update={
-            "trip_state": {"_pendingWidget": {"type": "question_card", "data": widget_data}},
             "messages": [ToolMessage(
-                content=f"Question rendered: {question}",
+                content=f"User answered the question {question!r} with: {answer}",
                 tool_call_id=tool_call_id,
             )],
         },

@@ -7,7 +7,11 @@
  * gives us a stable, cacheable URL.
  */
 
-const PROXY = '/api/image';
+// Route through the configured API origin when VITE_API_URL is set, matching
+// src/lib/api.ts — a bare '/api/image' would bypass it and hit whatever the
+// Vite dev proxy points at instead.
+const API_BASE = import.meta.env.VITE_API_URL || '';
+const PROXY = `${API_BASE}/api/image`;
 
 /**
  * Wrap an external image URL so it goes through the backend image proxy.

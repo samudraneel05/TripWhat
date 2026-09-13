@@ -6,7 +6,8 @@ import { chatApi } from '../../lib/api';
 import { QuestionCard, CompletedQuestion } from './widgets/QuestionCard';
 import { ItinerarySummary } from './widgets/ItinerarySummary';
 import { SearchResults } from './widgets/SearchResults';
-import { FormattedText } from './widgets/HighlightedText';
+import { ChatMarkdown } from '../../lib/chatMarkdown';
+import { buildChatRestore } from '../../lib/chatRestore';
 import { ToolActivityBar } from './widgets/ToolActivityBar';
 import { FlightCard } from '../FlightCard';
 
@@ -54,33 +55,71 @@ export function ChatPanel({
   const [itinerarySummary, setItinerarySummary] = useState<any>(null);
   const [flightCards, setFlightCards] = useState<any[]>([]);
   const [searchResults, setSearchResults] = useState<any>(null);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [hasStarted, setHasStarted] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const hasSentInitial = useRef(false);
 
-  // On mount: restore from chatStore if messages exist
+  // Restore the full chat UI from persisted messages. Runs on mount AND
+  // whenever the store's messages are replaced wholesale (e.g. fetchTrip
+  // resolving after ChatPanel has already mounted — the old mount-only
+  // effect missed that and left reopened chats empty). A pure append is
+  // skipped because live handlers already keep chatEntries in sync, so
+  // rebuilding would only clobber in-flight UI.
+  const messages = useChatStore((s) => s.messages);
+  const prevMessagesRef = useRef<typeof messages | null>(null);
+
   useEffect(() => {
-    const msgs = useChatStore.getState().messages;
-    if (msgs && msgs.length > 0) {
-      const entries: ChatEntry[] = msgs.map((m) =>
-        m.role === 'user'
-          ? { kind: 'user', text: m.content }
-          : { kind: 'assistant', text: m.content, widgets: m.widgets }
-      );
-      if (entries.length > 0) {
-        setChatEntries(entries);
-        setHasStarted(true);
-        const lastAssistant = [...entries].reverse().find((e) => e.kind === 'assistant');
-        if (lastAssistant && lastAssistant.kind === 'assistant') {
-          setAssistantText(lastAssistant.text);
-        }
+    const prev = prevMessagesRef.current;
+    prevMessagesRef.current = messages;
+
+    if (!messages || messages.length === 0) {
+      if (prev === null) {
+        // Mount-time: clean stale store state for a fresh chat.
+        reset();
+      } else if (prev.length > 0) {
+        // Store was reset mid-session — clear the restored UI.
+        setChatEntries([]);
+        setHasStarted(false);
+        setActiveWidget(null);
+        setAssistantText('');
+        setItinerarySummary(null);
+        setFlightCards([]);
+        setSearchResults(null);
+        setSuggestions([]);
       }
-    } else {
-      reset();
+      return;
+    }
+
+    if (prev && prev.length > 0 && messages.length >= prev.length) {
+      let prefixSame = true;
+      for (let i = 0; i < prev.length; i++) {
+        if (messages[i] !== prev[i]) { prefixSame = false; break; }
+      }
+      // Pure append (or no-op) → live handlers already updated the UI.
+      if (prefixSame) return;
+    }
+
+    // pendingWidget comes from the conversation endpoint — the checkpoint's
+    // pending interrupt. It's set on the store before setMessages, so read it
+    // imperatively here (the effect only re-runs on messages changes).
+    const restored = buildChatRestore(messages, useChatStore.getState().pendingWidget);
+    setChatEntries(restored.entries);
+    setHasStarted(restored.entries.length > 0);
+    setActiveWidget(restored.activeWidget);
+    setAssistantText(restored.assistantText);
+    setItinerarySummary(restored.itinerarySummary);
+    setFlightCards(restored.flightCards);
+    setSearchResults(restored.searchResults);
+    setSuggestions(restored.suggestions);
+    // The restored state is authoritative — drop any stale widget pointer
+    // left over from a previous session so it can't re-clobber activeWidget.
+    if (useChatStore.getState().lastWidget) {
+      useChatStore.setState({ lastWidget: null });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [messages]);
 
   useEffect(() => {
     if (initialMessage && !hasSentInitial.current && !hasStarted) {
@@ -117,9 +156,11 @@ export function ChatPanel({
     if (!socket) return;
 
     const handleWidget = (data: any) => {
-      // Only filter when we have a conversationId to compare against.
-      // On the first turn, conversationId is null — allow the event through.
-      if (data.conversationId && conversationIdRef.current && data.conversationId !== conversationIdRef.current) return;
+      // Reject events tagged for another conversation — a widget for conv A
+      // must never surface while the user is viewing conv B (or a fresh chat
+      // whose conversationId is still null). Untagged events pass through so
+      // the very first turn (id not yet assigned) still works.
+      if (data.conversationId && data.conversationId !== conversationIdRef.current) return;
       if (data.widget) {
         setActiveWidget(data.widget);
       }
@@ -129,15 +170,28 @@ export function ChatPanel({
     return () => { socket.off('agent:widget', handleWidget); };
   }, [socket]);
 
+  // Widget events can also arrive via chatStore.lastWidget — set by
+  // replayMissedEvents (G6) or the store-level socket handler when
+  // ChatPanel's own handler wasn't registered yet. Scoped by conversationId:
+  // a widget stored for another conversation (e.g. still streaming after the
+  // user navigated away) must not leak into this panel.
+  const lastWidget = useChatStore((s) => s.lastWidget);
+  useEffect(() => {
+    if (!lastWidget?.widget) return;
+    if (lastWidget.conversationId && lastWidget.conversationId !== conversationIdRef.current) return;
+    setActiveWidget(lastWidget.widget);
+  }, [lastWidget]);
+
   // Listen for final agent:response via Socket.IO
   useEffect(() => {
     if (!socket) return;
 
     const handleAgentResponse = (data: any) => {
-      // Only filter when we have a conversationId to compare against.
-      // On the first turn, conversationId is null — allow the event through
-      // so processResponse can set it and populate searchResults/widgets.
-      if (data.conversationId && conversationIdRef.current && data.conversationId !== conversationIdRef.current) return;
+      // Reject responses tagged for another conversation — navigating away
+      // mid-stream must not let conv A's response overwrite conv B's panel.
+      // Untagged events pass through so the first turn (id not yet assigned)
+      // can still populate searchResults/widgets.
+      if (data.conversationId && data.conversationId !== conversationIdRef.current) return;
       // processResponse sets React state (setAssistantText, setChatEntries, etc.)
       // which React 18 batches and applies asynchronously. The Zustand clears
       // below (setStreamingText/setLoading) are synchronous and trigger an
@@ -170,10 +224,6 @@ export function ChatPanel({
       setConversationId(data.conversationId);
     }
 
-    if (data.tripState && onTripStateUpdate) {
-      onTripStateUpdate(data.tripState);
-    }
-
     const widgets = data.widgets || [];
     const qWidget = widgets.find((w: any) => w.type === 'question_card');
     const sWidget = widgets.find((w: any) => w.type === 'itinerary_summary');
@@ -183,9 +233,9 @@ export function ChatPanel({
     // The backend includes the question_card widget in the response payload
     // so we know whether to keep or clear the widget. This handles stale
     // agent:widget events from previous turns that might re-set activeWidget.
-    // If an itinerary_summary or search_results widget is present, the question
-    // phase is over — always clear activeWidget.
-    if (qWidget && !sWidget && !srWidget) {
+    // A question_card is never vetoed by other widgets on the same turn —
+    // follow-up questions must still render after an itinerary/search turn.
+    if (qWidget) {
       setActiveWidget(qWidget);
     } else {
       setActiveWidget(null);
@@ -210,12 +260,34 @@ export function ChatPanel({
     // is set (via the !activeWidget check), so no duplication with the widget.
     setAssistantText(data.message || '');
 
-    if (data.message) {
-      // Store ALL widgets with the assistant entry (including question_card)
-      // so the rendering can skip question-turn entries in the history.
-      const entryWidgets = widgets.filter((w: any) =>
-        w.type === 'search_results' || w.type === 'itinerary_summary' || w.type === 'question_card'
-      );
+    // Suggestion chips emitted with this response.
+    setSuggestions(data.suggestions || []);
+
+    // Dedupe: when a historical response is re-delivered via
+    // replayMissedEvents after the messages were already restored from the
+    // DB, the last store message is identical — re-appending it would
+    // corrupt the saved chatHistory with duplicates.
+    const storeMsgs = useChatStore.getState().messages;
+    const lastMsg = storeMsgs[storeMsgs.length - 1];
+
+    // Store ALL widgets with the assistant entry (including question_card)
+    // so the rendering can skip question-turn entries in the history.
+    const entryWidgets = widgets.filter((w: any) =>
+      w.type === 'search_results' || w.type === 'itinerary_summary' ||
+      w.type === 'question_card' || w.type === 'flight_card'
+    );
+
+    const alreadyPersisted =
+      lastMsg?.role === 'assistant' &&
+      lastMsg.content === (data.message || '') &&
+      // an empty response only dedupes against a restored widget entry —
+      // otherwise every "" turn would collapse into the previous "" one
+      (!!data.message || !!lastMsg?.widgets?.length);
+
+    // A turn that ends on a question_card (the run suspended on an interrupt)
+    // may carry no message text — persist the entry anyway so the question
+    // turn survives in chatEntries/chatHistory.
+    if ((data.message || entryWidgets.length > 0) && !alreadyPersisted) {
       // Snapshot the tool activities so they persist in chat history
       const activitiesSnapshot = [...getToolActivities()];
       setChatEntries((prev) => [...prev, {
@@ -224,23 +296,26 @@ export function ChatPanel({
         widgets: entryWidgets,
         toolActivities: activitiesSnapshot,
       }]);
-    }
 
-    if (data.message) {
       useChatStore.getState().addMessage({
         role: 'assistant',
         content: data.message,
         timestamp: new Date().toISOString(),
         widgets: data.widgets,
-        suggestions: data.suggestions,
-        changeSummary: data.changeSummary,
-        classification: data.classification,
         toolActivities: [...getToolActivities()],
+        suggestions: data.suggestions || [],
       });
     }
 
     // Clear tool activities for the next turn
     clearToolActivities();
+
+    // Persist trip state AFTER the assistant message lands in the store so
+    // the saved chatHistory includes this turn's response (previously the
+    // save ran first and chatHistory lagged one message behind).
+    if (data.tripState && onTripStateUpdate) {
+      onTripStateUpdate(data.tripState);
+    }
 
     if (data.tripState?.itinerary && onItineraryBuilt) {
       onItineraryBuilt(data.tripState);
@@ -259,6 +334,9 @@ export function ChatPanel({
   const lastResponse = useChatStore((s) => s.lastResponse);
   useEffect(() => {
     if (!lastResponse) return;
+    // Skip responses tagged for another conversation — same cross-conv leak
+    // guard as the socket handler.
+    if (lastResponse.data?.conversationId && lastResponse.data.conversationId !== conversationIdRef.current) return;
     // Avoid double-processing: the socket handler calls processResponse
     // directly and sets lastProcessedTsRef. We only process here if the
     // socket handler didn't already handle this response.
@@ -288,6 +366,7 @@ export function ChatPanel({
     setSearchResults(null);
     setActiveWidget(null);
     setFlightCards([]);
+    setSuggestions([]);
     clearToolActivities();
     useTripStore.setState({ progressiveDays: null });
 
@@ -301,7 +380,6 @@ export function ChatPanel({
       const res = await chatApi.sendMessage({
         message: text,
         conversationId: conversationId || undefined,
-        currentItinerary: tripState?.itinerary || null,
       });
 
       if (res.data?.status === 'streaming') {
@@ -318,6 +396,7 @@ export function ChatPanel({
     } catch (err: any) {
       setAssistantText("I'm sorry, I couldn't process your request. Please try again.");
       setActiveWidget(null);
+      useChatStore.getState().settleToolActivities(true);
       setTimeout(() => {
         setLoading(false);
         setAgentStatus(null);
@@ -334,6 +413,7 @@ export function ChatPanel({
     setChatEntries((prev) => [...prev, { kind: 'answered', question, answerLabel }]);
     setActiveWidget(null);
     setAssistantText('');
+    setSuggestions([]);
 
     setLoading(true);
     setAgentStatus('Thinking...');
@@ -345,13 +425,13 @@ export function ChatPanel({
       role: 'user',
       content: answerLabel,
       timestamp: new Date().toISOString(),
+      answeredQuestion: question,
     });
 
     try {
       const res = await chatApi.sendMessage({
         message: answerLabel,
         conversationId: conversationId || undefined,
-        currentItinerary: tripState?.itinerary || null,
       });
 
       if (res.data?.status === 'streaming') {
@@ -367,6 +447,7 @@ export function ChatPanel({
       }
     } catch (err: any) {
       setAssistantText("I'm sorry, I couldn't process your request. Please try again.");
+      useChatStore.getState().settleToolActivities(true);
       setTimeout(() => {
         setLoading(false);
         setAgentStatus(null);
@@ -440,11 +521,28 @@ export function ChatPanel({
                 const isLastAssistant =
                   i === chatEntries.length - 1 && entry.kind === 'assistant';
                 if (isLastAssistant) return null; // rendered below with widgets
-                // Skip question-turn entries — CompletedQuestion represents them
+                // Question-turn entries: CompletedQuestion represents the
+                // question+answer, but keep any assistant text the turn also
+                // produced — the card must not swallow the message.
                 const hasQuestionCard = entry.widgets?.some((w: any) => w.type === 'question_card');
-                if (hasQuestionCard) return null;
-                // Render inline widgets (search results) for this message
+                if (hasQuestionCard) {
+                  if (!entry.text) return null;
+                  return (
+                    <div key={i} className="mt-2 mb-3">
+                      <ChatMarkdown
+                        text={entry.text}
+                        className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
+                      />
+                      {entry.toolActivities && entry.toolActivities.length > 0 && (
+                        <ToolActivityBar activities={entry.toolActivities} isLoading={false} />
+                      )}
+                    </div>
+                  );
+                }
+                // Render inline widgets for this message
                 const entrySrWidget = entry.widgets?.find((w: any) => w.type === 'search_results');
+                const entryItinWidget = entry.widgets?.find((w: any) => w.type === 'itinerary_summary');
+                const entryFlightWidgets = (entry.widgets || []).filter((w: any) => w.type === 'flight_card');
                 return (
                   <div key={i} className="mt-2 mb-3">
                     {entrySrWidget ? (
@@ -454,10 +552,24 @@ export function ChatPanel({
                         onSelectPlace={onSelectPlace}
                       />
                     ) : (
-                      <FormattedText
-                        text={entry.text}
-                        className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
-                      />
+                      <>
+                        {entry.text && (
+                          <ChatMarkdown
+                            text={entry.text}
+                            className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
+                          />
+                        )}
+                        {entryItinWidget && (
+                          <ItinerarySummary data={entryItinWidget.data} onSelectPlace={onSelectPlace} />
+                        )}
+                        {entryFlightWidgets.length > 0 && onSelectFlight && (
+                          <div className="space-y-2 mt-2">
+                            {entryFlightWidgets.map((w: any, fi: number) => (
+                              <FlightCard key={fi} flight={w.data} onOpen={onSelectFlight} />
+                            ))}
+                          </div>
+                        )}
+                      </>
                     )}
                     {/* Persisted tool activity bar for this message */}
                     {entry.toolActivities && entry.toolActivities.length > 0 && (
@@ -470,7 +582,7 @@ export function ChatPanel({
               {/* Streaming text (live token-by-token) */}
               {streamingText && (
                 <div className="mt-2 mb-3">
-                  <FormattedText
+                  <ChatMarkdown
                     text={streamingText}
                     className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
                   />
@@ -498,8 +610,28 @@ export function ChatPanel({
                 <ToolActivityBar activities={toolActivities} isLoading={true} />
               )}
 
+              {/* Latest assistant text — renders ABOVE the question card.
+                  A turn may produce both (the model speaks, then suspends on
+                  ask_question); gating on !activeWidget used to hide the text. */}
+              {assistantText && !searchResults && !isLoading && !streamingText && (
+                <div className="mt-2 mb-3">
+                  <ChatMarkdown
+                    text={assistantText}
+                    className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
+                  />
+                  {/* Show collapsed tool activity bar from the last entry */}
+                  {(() => {
+                    const lastEntry = chatEntries[chatEntries.length - 1];
+                    if (lastEntry?.kind === 'assistant' && lastEntry.toolActivities && lastEntry.toolActivities.length > 0) {
+                      return <ToolActivityBar activities={lastEntry.toolActivities} isLoading={false} />;
+                    }
+                    return null;
+                  })()}
+                </div>
+              )}
+
               {/* Active question card (from ask_question tool) */}
-              {activeWidget && activeWidget.type === 'question_card' && !isLoading && (
+              {activeWidget && activeWidget.type === 'question_card' && (
                 <QuestionCard data={activeWidget.data} onAnswer={handleAnswer} />
               )}
 
@@ -516,7 +648,10 @@ export function ChatPanel({
                   )}
                   {(() => {
                     const lastEntry = chatEntries[chatEntries.length - 1];
-                    if (lastEntry?.kind === 'assistant' && lastEntry.toolActivities && lastEntry.toolActivities.length > 0) {
+                    // Skip when the assistant text block below will render this
+                    // same bar — otherwise the collapsed bar appears twice.
+                    const textWillRender = assistantText && !searchResults && !streamingText;
+                    if (!textWillRender && lastEntry?.kind === 'assistant' && lastEntry.toolActivities && lastEntry.toolActivities.length > 0) {
                       return <ToolActivityBar activities={lastEntry.toolActivities} isLoading={false} />;
                     }
                     return null;
@@ -538,21 +673,18 @@ export function ChatPanel({
                 </>
               )}
 
-              {/* Latest assistant text (when no widget, no streaming) */}
-              {assistantText && !searchResults && !activeWidget && !isLoading && !streamingText && (
-                <div className="mt-2 mb-3">
-                  <FormattedText
-                    text={assistantText}
-                    className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
-                  />
-                  {/* Show collapsed tool activity bar from the last entry */}
-                  {(() => {
-                    const lastEntry = chatEntries[chatEntries.length - 1];
-                    if (lastEntry?.kind === 'assistant' && lastEntry.toolActivities && lastEntry.toolActivities.length > 0) {
-                      return <ToolActivityBar activities={lastEntry.toolActivities} isLoading={false} />;
-                    }
-                    return null;
-                  })()}
+              {/* Suggestion chips emitted with the latest response */}
+              {suggestions.length > 0 && !activeWidget && !isLoading && !streamingText && (
+                <div className="flex flex-wrap gap-1.5 mb-3">
+                  {suggestions.map((s, i) => (
+                    <button
+                      key={`${s}-${i}`}
+                      onClick={() => handleSend(s)}
+                      className="px-3 py-1.5 rounded-full border border-[var(--border)] bg-[var(--bg)] text-xs text-[var(--ink)] hover:bg-[var(--sage)] transition-colors"
+                    >
+                      {s}
+                    </button>
+                  ))}
                 </div>
               )}
 

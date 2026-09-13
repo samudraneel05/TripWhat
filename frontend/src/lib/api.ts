@@ -29,16 +29,11 @@ api.interceptors.response.use(
 export { api };
 
 export const authApi = {
-  register: (data: { name: string; email: string; password: string }) =>
-    api.post('/api/auth/register', data),
-  login: (data: { email: string; password: string }) =>
-    api.post('/api/auth/login', data),
-  me: () => api.get('/api/auth/me'),
   updateProfile: (data: any) => api.put('/api/auth/profile', data),
 };
 
 export const chatApi = {
-  sendMessage: (data: { message: string; conversationId?: string; currentItinerary?: any }) =>
+  sendMessage: (data: { message: string; conversationId?: string }) =>
     api.post('/api/chat', data),
   getHistory: (conversationId: string) =>
     api.get(`/api/chat/${conversationId}`),
@@ -47,19 +42,7 @@ export const chatApi = {
 };
 
 export const tripsApi = {
-  list: () => api.get('/api/saved-trips'),
-  get: (id: string) => api.get(`/api/saved-trips/${id}`),
-  create: (data: any) => api.post('/api/saved-trips', data),
-  update: (id: string, data: any) => api.put(`/api/saved-trips/${id}`, data),
-  delete: (id: string) => api.delete(`/api/saved-trips/${id}`),
-  upcoming: () => api.get('/api/saved-trips/upcoming'),
-  completed: () => api.get('/api/saved-trips/completed'),
   statistics: () => api.get('/api/saved-trips/statistics'),
-  markUpcoming: (id: string, data?: any) => api.put(`/api/saved-trips/${id}/upcoming`, data),
-  removeUpcoming: (id: string) => api.delete(`/api/saved-trips/${id}/upcoming`),
-  markCompleted: (id: string) => api.put(`/api/saved-trips/${id}/completed`),
-  checkSaved: (params: Record<string, string>) =>
-    api.get('/api/saved-trips/check', { params }),
 };
 
 export const savedApi = {
@@ -72,8 +55,6 @@ export const savedApi = {
 export const placesApi = {
   search: (query: string, limit = 5) =>
     api.get('/api/places/search', { params: { query, limit } }),
-  autocomplete: (query: string, limit = 8) =>
-    api.get('/api/places/autocomplete', { params: { query, limit } }),
   details: (placeId: string) =>
     api.get('/api/places/details', { params: { placeId } }),
 };
@@ -89,30 +70,13 @@ export const itineraryEditApi = {
     api.post(`/api/chat/${conversationId}/itinerary/caption`, data),
   move: (conversationId: string, data: { from_day: number; activity_id: string; to_day: number; to_slot?: string }) =>
     api.post(`/api/chat/${conversationId}/itinerary/move`, data),
-  reorder: (conversationId: string, data: { day: number; activity_id: string; new_position: number }) =>
-    api.post(`/api/chat/${conversationId}/itinerary/reorder`, data),
-};
-
-export const calendarApi = {
-  oauthUrl: () => api.get('/api/google/oauth/url'),
-  upcoming: () => api.get('/api/google/calendar/upcoming'),
-  createEvent: (payload: any) => api.post('/api/google/calendar/events', payload),
 };
 
 export const gmailApi = {
   oauthUrl: () => api.get('/api/google/gmail/oauth/url'),
   status: () => api.get('/api/google/gmail/status'),
   bookings: () => api.get('/api/google/gmail/bookings'),
+  disconnect: () => api.post('/api/google/gmail/disconnect'),
+  importBooking: (tripId: string | number, booking: any) =>
+    api.post(`/api/saved-trips/${tripId}/import-booking`, { booking }),
 };
-
-export function saveToken(token: string) {
-  localStorage.setItem('tripwhat_token', token);
-}
-
-export function getToken() {
-  return localStorage.getItem('tripwhat_token');
-}
-
-export function clearToken() {
-  localStorage.removeItem('tripwhat_token');
-}

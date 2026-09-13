@@ -1,10 +1,10 @@
 import { create } from 'zustand';
 import { io, type Socket } from 'socket.io-client';
-import { useChatStore } from './chatStore';
+import { useChatStore, serializeMessages } from './chatStore';
 import { chatApi, itineraryEditApi } from '../lib/api';
 import { prefetchImages, extractImageUrls } from '../lib/image';
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5001';
+const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
 
 export interface TripCity {
   name: string;
@@ -15,25 +15,20 @@ export interface TripCity {
 export interface TripDates {
   start: string;
   end: string;
-  flexible: boolean;
   assumed?: boolean;
   roughMonth?: string;
-  pending?: string;
 }
 
 export interface TripState {
-  status: 'planning' | 'confirmed' | 'archived';
+  status: 'planning' | 'upcoming' | 'completed' | 'archived';
   cities: TripCity[];
   dates?: TripDates;
   duration?: number;
-  travelers?: string;
+  travelers?: { adults?: number; children?: number } | string;
   preferences?: string[];
-  onboarding: {
-    slotsFilled: string[];
-    completed: boolean;
-  };
   version: number;
   itinerary?: any;
+  bookings?: any[];
 }
 
 export interface Trip {
@@ -56,12 +51,10 @@ export interface Trip {
 
 interface TripStore {
   trips: Trip[];
-  currentTrip: Trip | null;
   tripState: TripState | null;
   loading: boolean;
   error: string | null;
   socket: Socket | null;
-  socketConnected: boolean;
   pendingDiff: { tripState: TripState; changeSummary: any[] } | null;
   lastEventId: string | null;
   progressiveDays: { day: number; city: string; timeSlots: any[]; totalDays?: number }[] | null;
@@ -75,7 +68,6 @@ interface TripStore {
   connectSocket: (conversationId?: string) => void;
   disconnectSocket: () => void;
   applyTripUpdate: (trip: Trip, changeSummary?: any[]) => void;
-  setPendingDiff: (diff: { tripState: TripState; changeSummary: any[] } | null) => void;
   acceptDiff: () => void;
   rejectDiff: () => void;
   replayMissedEvents: (conversationId: string) => Promise<void>;
@@ -87,12 +79,10 @@ const API_URL = import.meta.env.VITE_API_URL || '';
 
 export const useTripStore = create<TripStore>((set, get) => ({
   trips: [],
-  currentTrip: null,
   tripState: null,
   loading: false,
   error: null,
   socket: null,
-  socketConnected: false,
   pendingDiff: null,
   lastEventId: null,
   progressiveDays: null,
@@ -122,22 +112,35 @@ export const useTripStore = create<TripStore>((set, get) => ({
       });
       if (!res.ok) throw new Error(`Failed to fetch trip (${res.status})`);
       const data = await res.json();
-      set({ currentTrip: data, tripState: data.tripState, loading: false });
+      set({ tripState: data.tripState, loading: false });
       if (data.conversationId) {
         useChatStore.getState().setConversationId(data.conversationId);
       }
-      // Restore chat history: prefer saved chatHistory, fall back to conversation DB
-      if (data.chatHistory?.length) {
-        useChatStore.getState().setMessages(data.chatHistory);
-      } else if (data.conversationId) {
+      // Restore chat history. The conversation DB is the authoritative
+      // record (the backend persists every turn, including widgets and tool
+      // activities); the saved chatHistory is a client mirror that can lag a
+      // turn behind. Use whichever is richer.
+      const savedHistory = Array.isArray(data.chatHistory) ? data.chatHistory : [];
+      let restored = savedHistory;
+      // A question_card still awaiting an answer — the LangGraph checkpoint's
+      // pending interrupt, surfaced by the conversation endpoint. Set BEFORE
+      // setMessages so ChatPanel's restore effect picks it up.
+      let pendingWidget: any = null;
+      if (data.conversationId) {
         try {
           const histRes = await chatApi.getHistory(data.conversationId);
-          if (histRes.data?.messages?.length) {
-            useChatStore.getState().setMessages(histRes.data.messages);
+          const convMsgs = histRes.data?.messages || [];
+          if (convMsgs.length >= restored.length) {
+            restored = convMsgs;
           }
+          pendingWidget = histRes.data?.pendingWidget || null;
         } catch {
-          // Conversation may not exist — ignore
+          // Conversation may not exist — fall back to saved chatHistory
         }
+      }
+      useChatStore.getState().setPendingWidget(pendingWidget);
+      if (restored.length) {
+        useChatStore.getState().setMessages(restored);
       }
     } catch (err: any) {
       set({ error: err.message, loading: false });
@@ -160,7 +163,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
         budget: null,
         generatedItinerary: ts.itinerary || { days: [] },
         tripState: ts,
-        chatHistory: messages.map((m) => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
+        chatHistory: serializeMessages(messages),
         conversationId: conversationId,
       };
       const res = await fetch(`${API_URL}/api/saved-trips`, {
@@ -174,7 +177,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
       if (!res.ok) throw new Error(`Failed to create trip (${res.status})`);
       const result = await res.json();
       const trip = result.savedTrip || result;
-      set({ currentTrip: trip, tripState: trip.tripState || ts, loading: false });
+      set({ tripState: trip.tripState || ts, loading: false });
       return trip;
     } catch (err: any) {
       set({ error: err.message, loading: false });
@@ -188,7 +191,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
       const { messages, conversationId } = useChatStore.getState();
       const payload = {
         ...data,
-        chatHistory: messages.map((m) => ({ role: m.role, content: m.content, timestamp: m.timestamp })),
+        chatHistory: serializeMessages(messages),
         conversationId: conversationId,
       };
       const res = await fetch(`${API_URL}/api/saved-trips/${id}`, {
@@ -202,7 +205,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
       if (!res.ok) throw new Error(`Failed to update trip (${res.status})`);
       const result = await res.json();
       const updated = result.savedTrip || result;
-      set({ currentTrip: updated, tripState: updated.tripState });
+      set({ tripState: updated.tripState });
     } catch (err: any) {
       set({ error: err.message });
     }
@@ -251,7 +254,6 @@ export const useTripStore = create<TripStore>((set, get) => ({
     });
 
     socket.on('connect', async () => {
-      set({ socketConnected: true });
       if (conversationId) {
         // Replay missed events before joining the room for live updates
         await get().replayMissedEvents(conversationId);
@@ -259,12 +261,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
       }
     });
 
-    socket.on('disconnect', () => {
-      set({ socketConnected: false });
-    });
-
     socket.on('reconnect', async () => {
-      set({ socketConnected: true });
       if (conversationId) {
         await get().replayMissedEvents(conversationId);
         socket.emit('join:conversation', conversationId);
@@ -295,9 +292,19 @@ export const useTripStore = create<TripStore>((set, get) => ({
       useChatStore.getState().setAgentStatus(data.status);
     });
 
+    // Record widget events at the store level too, so widgets emitted while
+    // ChatPanel's own handler isn't registered (e.g. before it mounts) still
+    // reach the UI via the lastWidget subscription.
+    socket.on('agent:widget', (data: { conversationId: string; widget: any; eventId?: string }) => {
+      if (data.eventId) set({ lastEventId: data.eventId });
+      if (data.widget) {
+        useChatStore.getState().setLastWidget(data.widget, data.conversationId);
+      }
+    });
+
     socket.on('agent:tool_start', (data: {
       conversationId: string; toolName: string; label: string;
-      callId: string; input?: any; eventId?: string;
+      callId: string; input?: any; group?: string; eventId?: string;
     }) => {
       if (data.eventId) set({ lastEventId: data.eventId });
       useChatStore.getState().addToolActivity({
@@ -305,6 +312,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
         toolName: data.toolName,
         label: data.label,
         status: 'running',
+        group: data.group,
       });
     });
 
@@ -371,7 +379,16 @@ export const useTripStore = create<TripStore>((set, get) => ({
       // Store the response so ChatPanel can process it via useEffect
       // if its socket handler missed the event (e.g. socket wasn't joined
       // to the room yet when the event was emitted).
+      // A completed response also supersedes any earlier widget event.
+      useChatStore.setState({ lastWidget: null });
+      // Keep pendingWidget in sync with the turn's outcome — a turn that ends
+      // on a question_card leaves a pending interrupt in the checkpoint.
+      const qWidget = (data.widgets || []).find((w: any) => w?.type === 'question_card');
+      useChatStore.setState({ pendingWidget: qWidget || null });
       chatStore.setLastResponse(data);
+      // The turn is over — settle any activities whose tool_end never
+      // arrived (e.g. the stream died mid-tool) so no row spins forever.
+      chatStore.settleToolActivities(!!data.error);
 
       // Clear streaming state. ChatPanel's agent:response handler also
       // does this (deferred via setTimeout), but we do it here as a
@@ -418,6 +435,27 @@ export const useTripStore = create<TripStore>((set, get) => ({
         chatStore.setAgentStatus('Reconnecting to stream...');
       }
 
+      // Widget + response events are order-sensitive: a response supersedes
+      // any widget emitted earlier in the batch, and only the LAST response
+      // should be forwarded (replayed historical responses are already in
+      // the persisted messages — forwarding each would re-append them).
+      let pendingWidget: any = null;
+      let pendingResponse: any = null;
+
+      // Staleness guard: never re-apply stream events older than the
+      // persisted message history (e.g. on reopen after a full page reload,
+      // where the DB-backed messages are already restored). Events carry
+      // server timestamps; a replayed event strictly older than the newest
+      // message is guaranteed stale.
+      const persistedTs = (useChatStore.getState().messages || []).reduce(
+        (max, m) => {
+          const t = m.timestamp ? Date.parse(m.timestamp) : 0;
+          return Number.isFinite(t) && t > max ? t : max;
+        },
+        0,
+      );
+      const eventTs = (e: any) => Date.parse(e?.timestamp || '') || 0;
+
       for (const event of events) {
         const data = event.data;
         switch (event.type) {
@@ -433,7 +471,10 @@ export const useTripStore = create<TripStore>((set, get) => ({
             }
             break;
           case 'widget':
-            // Widget events from ask_question tool — handled by ChatPanel
+            // Widget events from ask_question tool — surface via lastWidget
+            // so ChatPanel restores the pending QuestionCard on reconnect.
+            // Only the trailing widget matters; a later response clears it.
+            pendingWidget = { widget: data.widget || null, ts: eventTs(event) };
             break;
           case 'tool_start':
             chatStore.addToolActivity({
@@ -441,6 +482,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
               toolName: data.toolName,
               label: data.label,
               status: 'running',
+              group: data.group,
             });
             break;
           case 'tool_end':
@@ -468,16 +510,29 @@ export const useTripStore = create<TripStore>((set, get) => ({
             chatStore.setStreamingText('');
             chatStore.setLoading(false);
             chatStore.setAgentStatus(null);
+            chatStore.settleToolActivities(!!data.error);
             if (data.tripState) {
               get().setTripState(data.tripState);
             }
             // Clear progressive days — full itinerary has arrived
             set({ progressiveDays: null });
-            // Store the response so ChatPanel can process it via useEffect
-            // (processResponse updates chatEntries, assistantText, widgets, etc.)
-            chatStore.setLastResponse(data);
+            // Response supersedes any widget emitted earlier this batch.
+            pendingWidget = null;
+            pendingResponse = { data, ts: eventTs(event) };
             break;
         }
+      }
+
+      // Apply the tail state after the batch: a trailing widget restores the
+      // pending QuestionCard; the last response lets ChatPanel finish the
+      // turn. Both are skipped when they predate the persisted history —
+      // the restored messages are then the source of truth.
+      if (pendingResponse && pendingResponse.ts > persistedTs) {
+        useChatStore.setState({ lastWidget: null });
+        chatStore.setLastResponse(pendingResponse.data);
+      }
+      if (pendingWidget && pendingWidget.ts > persistedTs) {
+        chatStore.setLastWidget(pendingWidget.widget, conversationId);
       }
 
       if (newLastId) {
@@ -489,13 +544,11 @@ export const useTripStore = create<TripStore>((set, get) => ({
   },
 
   applyTripUpdate: (trip: Trip, changeSummary?: any[]) => {
-    set({ currentTrip: trip, tripState: trip.tripState });
+    set({ tripState: trip.tripState });
     if (changeSummary) {
       useTripStore.getState();
     }
   },
-
-  setPendingDiff: (diff) => set({ pendingDiff: diff }),
 
   acceptDiff: () => {
     const { pendingDiff } = get();
