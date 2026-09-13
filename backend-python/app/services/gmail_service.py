@@ -33,8 +33,8 @@ from app.utils.logger import logger
 GMAIL_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "openid",
-    "email",
-    "profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
 # Cap of LLM fallback calls per search_bookings() run — keeps the endpoint cheap.

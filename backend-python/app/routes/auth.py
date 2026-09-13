@@ -108,10 +108,12 @@ async def update_profile(
 
 # ── Google OAuth for signup/login ──
 
+# Full scope URIs — Google echoes back canonical URIs and oauthlib raises the
+# scope-change Warning as an error if they don't set-match the request.
 _GOOGLE_SCOPES = [
     "openid",
-    "email",
-    "profile",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
 ]
 
 
