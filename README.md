@@ -118,10 +118,6 @@ The travel-AI category is full of demos that stop at a bulleted list. TripWhat i
 - **Evaluation is a feature, not an afterthought.** 170 automated tests, an 80-case LLM-judged benchmark, LangSmith datasets + `evaluate()` integration, and full trace observability on every agent run — the "show how you know it works" criterion has a concrete answer.
 
 
-https://github.com/user-attachments/assets/68930966-7072-4364-a773-216e74dc9bf0
-
-<img width="1467" height="811" alt="Screenshot 2026-09-14 at 4 57 34 AM" src="https://github.com/user-attachments/assets/cca82f3e-d02c-42dd-88b8-3f88e7d5c145" />
-
 - **Production-grade engineering.** Durable agent state via Postgres checkpointing, PKCE-secured OAuth with encrypted tokens and incremental scope merging, Redis-backed resumable streaming, bounded-concurrency enrichment, checkpoint-synced manual edits.
 - **Human-in-the-loop done right.** Questions suspend the graph via `interrupt()` and resume with `Command(resume)` — pending prompts survive reloads and multi-question chains.
 - **Original mechanism.** The reel→places cascade (metadata → video understanding → scraper fallback → Places re-rank) is a genuinely novel pipeline for this category — inspiration ingestion is the unsolved edge of travel planning.
