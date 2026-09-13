@@ -701,7 +701,10 @@ class TravelAgent:
             itinerary = final_trip_state["itinerary"]
 
         search_results = get_search_results()
-        widgets = self._build_widgets(final_trip_state, search_results)
+        # Emit the itinerary summary only on the turn the itinerary was built
+        # or changed — otherwise every unrelated chat turn re-attaches the card.
+        itinerary_changed = itinerary is not None and itinerary != prior_ts.get("itinerary")
+        widgets = self._build_widgets(final_trip_state, search_results, include_itinerary=itinerary_changed)
         # Include the pending question widget in the complete payload so the
         # frontend can know this turn called ask_question (and not clear
         # activeWidget). The agent:widget event already fired above, but
@@ -754,14 +757,19 @@ class TravelAgent:
             return days[0].get("city", "")
         return ""
 
-    def _build_widgets(self, trip_state: dict | None, search_results: list | None = None) -> list[dict]:
-        """Build UI widgets based on current state."""
+    def _build_widgets(self, trip_state: dict | None, search_results: list | None = None, include_itinerary: bool = True) -> list[dict]:
+        """Build UI widgets based on current state.
+
+        `include_itinerary=False` suppresses the itinerary_summary + flight
+        widgets — callers pass it when the itinerary didn't change this turn,
+        so unrelated chat turns don't re-emit the card.
+        """
         widgets = []
         trip_state = trip_state or {}
 
-        # Show itinerary summary widget when itinerary is built
+        # Show itinerary summary widget when the itinerary was built or changed
         itinerary = trip_state.get("itinerary")
-        if itinerary:
+        if itinerary and include_itinerary:
             hotels = itinerary.get("hotelRecommendations", [])
             best_hotel = hotels[0] if hotels else None
 
