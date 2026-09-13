@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useParams, useNavigate } from 'react-router-dom';
 import { Compass, Plus } from 'lucide-react';
 import { ChatPanel } from '../components/Chat/ChatPanel';
 import { TripMap } from '../components/map/TripMap';
@@ -11,14 +11,17 @@ import type { FlightOption } from '../components/FlightCard';
 import { useTripStore } from '../stores/tripStore';
 import { useChatStore } from '../stores/chatStore';
 import { useUIStore } from '../stores/uiStore';
+import { chatApi } from '../lib/api';
 
 export default function NewTripPage() {
   const [searchParams] = useSearchParams();
+  const { conversationId: routeConvId } = useParams<{ conversationId?: string }>();
+  const navigate = useNavigate();
   const initialQuery = searchParams.get('q') || '';
   const [localTripState, setLocalTripState] = useState<any>(null);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
-  const { createTrip, updateTrip, setTripState, connectSocket, disconnectSocket } = useTripStore();
+  const { createTrip, updateTrip, setTripState, connectSocket, disconnectSocket, fetchTrips } = useTripStore();
   const conversationId = useChatStore((s) => s.conversationId);
   const { activeTab, setActiveTab, cityFilter, setCityFilter } = useUIStore();
   const tripIdRef = useRef<number | null>(null);
@@ -45,6 +48,48 @@ export default function NewTripPage() {
       connectSocket(conversationId);
     }
   }, [conversationId, connectSocket]);
+
+  // Resume an in-progress conversation (/chat/:conversationId) — restores
+  // messages, pending question widgets, and trip state without requiring a
+  // saved trip. Also adopts the saved trip's id when one is already linked,
+  // so the next save updates it instead of creating a duplicate.
+  useEffect(() => {
+    if (!routeConvId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await chatApi.getHistory(routeConvId);
+        const data = res.data || {};
+        if (cancelled) return;
+        const chat = useChatStore.getState();
+        chat.setConversationId(routeConvId);
+        // Set pendingWidget BEFORE setMessages — ChatPanel's restore effect
+        // reads it imperatively when rebuilding entries.
+        chat.setPendingWidget(data.pendingWidget || null);
+        if (data.messages?.length) chat.setMessages(data.messages);
+        if (data.tripState) {
+          setTripState(data.tripState);
+          setLocalTripState(data.tripState);
+        }
+        await fetchTrips();
+        const linked = useTripStore.getState().trips.find(
+          (t: any) => t.conversationId === routeConvId
+        );
+        if (linked) tripIdRef.current = linked.id;
+      } catch (e) {
+        console.error('Failed to resume conversation:', e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [routeConvId, fetchTrips, setTripState]);
+
+  // Once a new conversation exists, pin its id in the URL so reloads reopen
+  // the chat instead of resetting to a blank /new.
+  useEffect(() => {
+    if (conversationId && conversationId !== routeConvId) {
+      navigate(`/chat/${conversationId}`, { replace: true });
+    }
+  }, [conversationId, routeConvId, navigate]);
 
   const handleTripStateUpdate = useCallback((tripState: any) => {
     setLocalTripState(tripState);
@@ -95,7 +140,7 @@ export default function NewTripPage() {
       <div className="w-[52%] shrink-0 border-r border-[var(--border)] relative">
         <ChatPanel
           title="New trip"
-          initialMessage={initialQuery}
+          initialMessage={routeConvId ? '' : initialQuery}
           onTripStateUpdate={handleTripStateUpdate}
           onSelectPlace={setSelectedPlaceId}
         />

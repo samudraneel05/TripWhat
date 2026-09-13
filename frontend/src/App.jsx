@@ -83,6 +83,17 @@ function AppContent() {
         />
 
         <Route
+          path="/chat/:conversationId"
+          element={
+            <ProtectedRoute>
+              <AppLayout>
+                <NewTripPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
           path="/profile"
           element={
             <ProtectedRoute>

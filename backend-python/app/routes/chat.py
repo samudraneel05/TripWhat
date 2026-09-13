@@ -366,6 +366,35 @@ async def _process_agent_stream(
         await stream_buffer.mark_done(conv_id)
 
 
+@router.get("")
+@router.get("/")
+async def list_conversations(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Recent conversations for the user — lets the UI reopen chats that were
+    never saved as trips (e.g. still mid-question during onboarding)."""
+    result = await db.execute(
+        select(Conversation)
+        .where(Conversation.user_id == user.id)
+        .order_by(Conversation.updated_at.desc())
+        .limit(30)
+    )
+    items = []
+    for c in result.scalars().all():
+        preview = ""
+        for m in c.messages or []:
+            if m.get("role") == "user":
+                preview = (m.get("content") or "")[:80]
+                break
+        items.append({
+            "conversationId": c.conversation_id,
+            "preview": preview,
+            "updatedAt": c.updated_at.isoformat() if c.updated_at else None,
+        })
+    return {"conversations": items}
+
+
 @router.get("/history/{conversation_id}")
 @router.get("/{conversation_id}")
 async def get_conversation(
@@ -408,6 +437,7 @@ async def get_conversation(
         "conversationId": conversation.conversation_id,
         "messages": messages,
         "metadata": conversation.meta,
+        "tripState": conversation.trip_state,
         "pendingWidget": pending_widget,
         "createdAt": conversation.created_at.isoformat() if conversation.created_at else None,
         "updatedAt": conversation.updated_at.isoformat() if conversation.updated_at else None,

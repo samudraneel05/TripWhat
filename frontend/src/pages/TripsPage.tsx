@@ -1,14 +1,19 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, MapPin, Calendar, Clock, Trash2 } from 'lucide-react';
+import { Plus, MapPin, Calendar, Clock, Trash2, MessageCircle } from 'lucide-react';
 import { useTripStore } from '../stores/tripStore';
+import { chatApi } from '../lib/api';
 
 export default function TripsPage() {
   const { trips, loading, error, fetchTrips, deleteTrip } = useTripStore();
   const [tab, setTab] = useState<'all' | 'upcoming' | 'past'>('all');
+  const [conversations, setConversations] = useState<any[]>([]);
 
   useEffect(() => {
     fetchTrips();
+    chatApi.listConversations()
+      .then((res) => setConversations(res.data?.conversations || []))
+      .catch(() => {});
   }, [fetchTrips]);
 
   const filtered = trips.filter((t) => {
@@ -17,6 +22,11 @@ export default function TripsPage() {
     if (tab === 'past') return t.isCompleted;
     return true;
   });
+
+  // Conversations not linked to a saved trip — chats still mid-planning that
+  // would otherwise have no way back in.
+  const linkedConvIds = new Set(trips.map((t) => t.conversationId).filter(Boolean));
+  const inProgress = conversations.filter((c) => !linkedConvIds.has(c.conversationId));
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -54,6 +64,33 @@ export default function TripsPage() {
             </button>
           ))}
         </div>
+
+        {!loading && inProgress.length > 0 && (
+          <div className="mb-6">
+            <h2 className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-2">
+              In progress
+            </h2>
+            <div className="space-y-1.5">
+              {inProgress.map((c) => (
+                <Link
+                  key={c.conversationId}
+                  to={`/chat/${c.conversationId}`}
+                  className="flex items-center gap-2.5 rounded-lg bg-[var(--surface)] border border-[var(--border)] px-3.5 py-2.5 hover:shadow-[var(--shadow-soft-hover)] transition-shadow"
+                >
+                  <MessageCircle className="w-3.5 h-3.5 text-[var(--muted)] shrink-0" />
+                  <span className="text-sm text-[var(--ink)] truncate flex-1">
+                    {c.preview || 'Untitled conversation'}
+                  </span>
+                  {c.updatedAt && (
+                    <span className="text-xs text-[var(--muted)] shrink-0">
+                      {new Date(c.updatedAt).toLocaleDateString()}
+                    </span>
+                  )}
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
 
         {loading && (
           <div className="text-center py-16 text-sm text-[var(--muted)]">Loading trips...</div>

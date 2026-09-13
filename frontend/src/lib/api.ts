@@ -37,6 +37,8 @@ export const chatApi = {
     api.post('/api/chat', data),
   getHistory: (conversationId: string) =>
     api.get(`/api/chat/${conversationId}`),
+  listConversations: () =>
+    api.get(`/api/chat`),
   getStreamEvents: (conversationId: string, after?: string) =>
     api.get(`/api/chat/stream/${conversationId}`, { params: { after: after || '0' } }),
 };

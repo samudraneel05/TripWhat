@@ -25,15 +25,31 @@ export function imgUrl(url?: string | null): string {
 
 /**
  * Prefetch a list of image URLs through the proxy in the background.
- * Fires fetch() calls without awaiting — warms the DB + browser cache
- * before the user scrolls to the images.
+ * Warms the DB + browser cache before the user scrolls to the images.
+ *
+ * Bounded concurrency — an itinerary can carry hundreds of photo URLs; firing
+ * them all at once floods the image proxy (502s) and can exhaust browser
+ * sockets (ERR_INSUFFICIENT_RESOURCES).
  */
+const PREFETCH_CONCURRENCY = 6;
+
 export function prefetchImages(urls: (string | null | undefined)[]): void {
-  for (const url of urls) {
-    if (!url || !url.startsWith('http')) continue;
-    // Use no-cors + keepalive so the request doesn't block and survives navigation
-    fetch(imgUrl(url), { mode: 'no-cors', keepalive: true }).catch(() => {});
-  }
+  const queue = urls.filter((u): u is string => !!u && u.startsWith('http'));
+  const workers = Array.from(
+    { length: Math.min(PREFETCH_CONCURRENCY, queue.length) },
+    async () => {
+      while (queue.length > 0) {
+        const url = queue.shift()!;
+        try {
+          // no-cors + keepalive so the request doesn't block and survives navigation
+          await fetch(imgUrl(url), { mode: 'no-cors', keepalive: true });
+        } catch {
+          // Best-effort warm — ignore failures
+        }
+      }
+    }
+  );
+  void Promise.all(workers);
 }
 
 /**
