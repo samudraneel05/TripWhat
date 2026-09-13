@@ -1,10 +1,24 @@
-"""Google Calendar service — OAuth + event management."""
+"""Google Calendar service — OAuth + event management.
 
-from google.oauth2.credentials import Credentials
+Shares Google OAuth token handling with gmail_service via
+app.services.google_oauth (encrypted tokens, merge-update saves, signed
+connect-state nonces, asyncio.to_thread for blocking googleapiclient calls).
+"""
+
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 from app.config import settings
+from app.services import google_oauth
+from app.utils.logger import logger
+
+CALENDAR_SCOPES = [
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "openid",
+    "email",
+    "profile",
+]
 
 
 class CalendarService:
@@ -22,94 +36,76 @@ class CalendarService:
                     "redirect_uris": [settings.google_redirect_uri],
                 }
             },
-            scopes=[
-                "https://www.googleapis.com/auth/calendar.events",
-                "https://www.googleapis.com/auth/calendar.readonly",
-                "openid",
-                "email",
-                "profile",
-            ],
+            scopes=CALENDAR_SCOPES,
             redirect_uri=settings.google_redirect_uri,
         )
 
-    def get_oauth_url(self, jwt_token: str) -> str:
+    def get_oauth_url(self, user_id: str) -> str:
         flow = self._create_flow()
         url, _ = flow.authorization_url(
             access_type="offline",
             prompt="consent",
-            state=jwt_token,
+            include_granted_scopes=True,  # incremental authorization
+            state=google_oauth.build_connect_state(user_id, "calendar_connect"),
         )
         return url
 
     async def exchange_code_and_store_tokens(self, code: str, user_id: str):
-        from sqlalchemy import select
-        from app.database import async_session
-        from app.models import User
-
         flow = self._create_flow()
-        flow.fetch_token(code=code)
-        creds = flow.credentials
-
-        async with async_session() as db:
-            result = await db.execute(select(User).where(User.id == int(user_id)))
-            user = result.scalar_one_or_none()
-            if user:
-                user.google_tokens = {
-                    "access_token": creds.token,
-                    "refresh_token": creds.refresh_token,
-                    "scope": creds.scope,
-                    "token_uri": creds.token_uri,
-                    "client_id": creds.client_id,
-                    "client_secret": creds.client_secret,
-                }
-                await db.commit()
+        await google_oauth.run_sync(flow.fetch_token, code=code)
+        # Merge-update: preserve refresh token + scopes granted by other flows.
+        await google_oauth.save_google_tokens(user_id, flow.credentials)
 
     async def _get_authorized_client(self, user_id: str):
-        from sqlalchemy import select
-        from app.database import async_session
-        from app.models import User
+        """Returns (service, creds, previous_access_token)."""
+        creds, prev_token = await google_oauth.load_google_credentials(user_id)
+        service = await google_oauth.run_sync(build, "calendar", "v3", credentials=creds)
+        return service, creds, prev_token
 
-        async with async_session() as db:
-            result = await db.execute(select(User).where(User.id == int(user_id)))
-            user = result.scalar_one_or_none()
-            if not user or not user.google_tokens:
-                raise ValueError("Google not connected")
-
-            tokens = user.google_tokens
-            creds = Credentials(
-                token=tokens.get("access_token"),
-                refresh_token=tokens.get("refresh_token"),
-                token_uri=tokens.get("token_uri"),
-                client_id=tokens.get("client_id"),
-                client_secret=tokens.get("client_secret"),
-                scopes=tokens.get("scope", "").split(),
-            )
-            return build("calendar", "v3", credentials=creds)
+    async def disconnect(self, user_id: str) -> bool:
+        """Revoke the Google grant and clear stored tokens."""
+        return await google_oauth.revoke_and_disconnect(user_id)
 
     async def list_upcoming_events(self, user_id: str, max_results: int = 20) -> list[dict]:
-        service = await self._get_authorized_client(user_id)
+        service, creds, prev_token = await self._get_authorized_client(user_id)
         from datetime import datetime, timezone
-        events_result = service.events().list(
-            calendarId="primary",
-            timeMin=datetime.now(timezone.utc).isoformat() + "Z",
-            maxResults=max_results,
-            singleEvents=True,
-            orderBy="startTime",
-        ).execute()
+        try:
+            events_result = await google_oauth.run_sync(
+                service.events().list(
+                    calendarId="primary",
+                    timeMin=datetime.now(timezone.utc).isoformat() + "Z",
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy="startTime",
+                ).execute
+            )
+        except Exception as e:
+            await google_oauth.handle_auth_failure(user_id, e)
+            raise
+        finally:
+            await google_oauth.persist_if_refreshed(user_id, creds, prev_token)
         return events_result.get("items", [])
 
     async def create_event(self, user_id: str, event_data: dict) -> dict:
-        service = await self._get_authorized_client(user_id)
-        event = service.events().insert(
-            calendarId="primary",
-            body={
-                "summary": event_data.get("summary"),
-                "description": event_data.get("description"),
-                "location": event_data.get("location"),
-                "start": {"dateTime": event_data.get("start"), "timeZone": event_data.get("timeZone")},
-                "end": {"dateTime": event_data.get("end"), "timeZone": event_data.get("timeZone")},
-            },
-        ).execute()
+        service, creds, prev_token = await self._get_authorized_client(user_id)
+        try:
+            event = await google_oauth.run_sync(
+                service.events().insert(
+                    calendarId="primary",
+                    body={
+                        "summary": event_data.get("summary"),
+                        "description": event_data.get("description"),
+                        "location": event_data.get("location"),
+                        "start": {"dateTime": event_data.get("start"), "timeZone": event_data.get("timeZone")},
+                        "end": {"dateTime": event_data.get("end"), "timeZone": event_data.get("timeZone")},
+                    },
+                ).execute
+            )
+        except Exception as e:
+            await google_oauth.handle_auth_failure(user_id, e)
+            raise
+        finally:
+            await google_oauth.persist_if_refreshed(user_id, creds, prev_token)
         return event
 
 

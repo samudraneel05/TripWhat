@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     google_redirect_uri: str = "http://localhost:5000/api/google/oauth/callback"
     gmail_redirect_uri: str = "http://localhost:5000/api/google/gmail/oauth/callback"
+    # Optional Fernet key (urlsafe-b64 32 bytes) for encrypting Google tokens at
+    # rest. When empty, a key is derived from jwt_secret.
+    google_token_encryption_key: str = ""
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

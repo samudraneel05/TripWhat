@@ -1,8 +1,9 @@
-"""Auth routes — register, login, me, update profile."""
+"""Auth routes — register, login, me, update profile, Google OAuth."""
 
 import jwt
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,3 +103,129 @@ async def update_profile(
     await db.commit()
     await db.refresh(user)
     return {"message": "Profile updated successfully", "user": _user_response(user)}
+
+
+# ── Google OAuth for signup/login ──
+
+_GOOGLE_SCOPES = [
+    "openid",
+    "email",
+    "profile",
+]
+
+
+def _google_auth_redirect_uri() -> str:
+    """Return the redirect URI for Google auth signup/login."""
+    base = settings.frontend_url.rstrip("/")
+    return f"{base}/api/auth/google/callback"
+
+
+@router.get("/google")
+async def google_auth_start(redirect: str = Query("/trips")):
+    """Redirect the user to Google's consent screen for signup/login."""
+    if not settings.google_client_id:
+        raise HTTPException(status_code=500, detail="Google OAuth is not configured")
+
+    from google_auth_oauthlib.flow import Flow
+
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [_google_auth_redirect_uri()],
+            }
+        },
+        scopes=_GOOGLE_SCOPES,
+        redirect_uri=_google_auth_redirect_uri(),
+    )
+
+    state_payload = {
+        "redirect": redirect,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
+    }
+    state_token = jwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
+
+    url, _ = flow.authorization_url(
+        access_type="offline",
+        prompt="consent",
+        state=state_token,
+    )
+    return RedirectResponse(url=url, status_code=302)
+
+
+@router.get("/google/callback")
+async def google_auth_callback(
+    code: str = Query(...),
+    state: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Handle the Google OAuth callback — create or log in the user."""
+    from google_auth_oauthlib.flow import Flow
+    from googleapiclient.discovery import build
+    import json
+
+    # Verify state
+    try:
+        state_payload = jwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        redirect = state_payload.get("redirect", "/trips")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid state token")
+
+    flow = Flow.from_client_config(
+        {
+            "web": {
+                "client_id": settings.google_client_id,
+                "client_secret": settings.google_client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "redirect_uris": [_google_auth_redirect_uri()],
+            }
+        },
+        scopes=_GOOGLE_SCOPES,
+        redirect_uri=_google_auth_redirect_uri(),
+    )
+
+    flow.fetch_token(code=code)
+    credentials = flow.credentials
+
+    # Get user info from Google
+    userinfo_service = build("oauth2", "v2", credentials=credentials)
+    userinfo = userinfo_service.userinfo().get().execute()
+    google_email = userinfo.get("email", "")
+    google_name = userinfo.get("name", google_email.split("@")[0] if google_email else "Traveler")
+    google_picture = userinfo.get("picture")
+
+    if not google_email:
+        raise HTTPException(status_code=400, detail="Could not retrieve email from Google")
+
+    # Find or create user
+    result = await db.execute(select(User).where(User.email == google_email))
+    user = result.scalar_one_or_none()
+
+    if not user:
+        user = User(
+            name=google_name,
+            email=google_email,
+            password=_hash_password(google_email + settings.jwt_secret),  # random password
+            avatar_url=google_picture,
+            preferences={},
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    elif google_picture and not user.avatar_url:
+        user.avatar_url = google_picture
+        await db.commit()
+
+    token = _create_token(user.id)
+
+    # Redirect to frontend with token
+    frontend_base = settings.frontend_url.rstrip("/")
+    redirect_clean = redirect.lstrip("/")
+    return RedirectResponse(
+        url=f"{frontend_base}/auth/google/success?token={token}&redirect={redirect_clean}",
+        status_code=302,
+    )

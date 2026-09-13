@@ -1,26 +1,22 @@
-"""Gmail routes — OAuth URL, callback, booking search."""
+"""Gmail routes — OAuth URL, callback, status, booking search, disconnect."""
 
-import jwt
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 
 from app.config import settings
 from app.deps import get_current_user
 from app.models import User
+from app.services import google_oauth
 from app.services.gmail_service import gmail_service
 
 router = APIRouter()
 
 
 @router.get("/gmail/oauth/url")
-async def get_gmail_oauth_url(request: Request, user: User = Depends(get_current_user)):
+async def get_gmail_oauth_url(user: User = Depends(get_current_user)):
     """Get Gmail OAuth URL for the user to authorize."""
-    auth_header = request.headers.get("Authorization", "")
-    token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else None
-    if not token:
-        raise HTTPException(status_code=400, detail="Missing bearer token")
     try:
-        url = gmail_service.get_oauth_url(token)
+        url = gmail_service.get_oauth_url(str(user.id))
         return {"url": url}
     except ValueError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -31,16 +27,13 @@ async def gmail_oauth_callback(
     code: str = Query(...),
     state: str = Query(...),
 ):
-    """Handle Gmail OAuth callback."""
+    """Handle Gmail OAuth callback — state is a short-lived signed nonce."""
     try:
-        payload = jwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
-        user_id = payload.get("sub") or payload.get("userId")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid state token")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="Invalid state token")
+        user_id = google_oauth.verify_connect_state(state, "gmail_connect")
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
 
-    await gmail_service.exchange_code_and_store_tokens(code, str(user_id))
+    await gmail_service.exchange_code_and_store_tokens(code, user_id)
     return RedirectResponse(
         url=f"{settings.frontend_url}/trips?gmail=connected",
         status_code=302,
@@ -61,6 +54,15 @@ async def get_gmail_bookings(user: User = Depends(get_current_user)):
         bookings = await gmail_service.search_bookings(str(user.id))
         return {"bookings": bookings, "count": len(bookings)}
     except ValueError as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        # Not a 401 — the frontend axios interceptor logs out on 401. A missing
+        # or expired Google grant is a 400-level client state issue instead.
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/gmail/disconnect")
+async def gmail_disconnect(user: User = Depends(get_current_user)):
+    """Revoke the Google grant and clear stored tokens (also disconnects Calendar)."""
+    disconnected = await gmail_service.disconnect(str(user.id))
+    return {"disconnected": True, "hadConnection": disconnected}
