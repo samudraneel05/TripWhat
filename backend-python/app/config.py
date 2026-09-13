@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # rest. When empty, a key is derived from jwt_secret.
     google_token_encryption_key: str = ""
 
+    # Link import (social reel -> saved places)
+    google_video_understanding_key: str = ""  # Gemini API key for video understanding
+    apify_token: str = ""                     # optional fallback scraper for IG/TikTok
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

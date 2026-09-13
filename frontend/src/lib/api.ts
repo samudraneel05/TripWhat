@@ -52,6 +52,7 @@ export const savedApi = {
   save: (data: { itemType: string; name: string; data?: any; tripId?: number }) =>
     api.post('/api/saved', data),
   remove: (id: number) => api.delete(`/api/saved/${id}`),
+  importLink: (url: string) => api.post('/api/saved/import-link', { url }),
 };
 
 export const placesApi = {
