@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     # Link import (social reel -> saved places)
     google_video_understanding_key: str = ""  # Gemini API key for video understanding
     apify_token: str = ""                     # optional fallback scraper for IG/TikTok
+    duffel_access_token: str = ""             # duffel_test_... — flight search + test booking
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

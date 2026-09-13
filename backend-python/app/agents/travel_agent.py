@@ -31,6 +31,7 @@ from app.agents.tools.itinerary_tools import build_itinerary, edit_itinerary
 from app.agents.tools.calendar_tools import create_calendar_event
 from app.agents.tools.gmail_tools import get_email_bookings, import_email_booking
 from app.agents.tools.memory_tools import remember_user_preference
+from app.agents.tools.flight_tools import search_flights, book_flight
 from app.agents.tools.mcp_tools import (
     mcp_search_places, mcp_resolve_names, mcp_compute_routes, mcp_lookup_weather, mcp_find_nearby,
     init_search_results, get_search_results,
@@ -139,6 +140,8 @@ class TravelAgent:
             create_calendar_event,
             get_email_bookings,
             import_email_booking,
+            search_flights,
+            book_flight,
             remember_user_preference,
             mcp_search_places,
             mcp_resolve_names,
