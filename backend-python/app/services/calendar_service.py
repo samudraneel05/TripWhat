@@ -5,6 +5,8 @@ app.services.google_oauth (encrypted tokens, merge-update saves, signed
 connect-state nonces, asyncio.to_thread for blocking googleapiclient calls).
 """
 
+import secrets
+
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
@@ -22,7 +24,7 @@ CALENDAR_SCOPES = [
 
 
 class CalendarService:
-    def _create_flow(self) -> Flow:
+    def _create_flow(self, code_verifier: str | None = None) -> Flow:
         if not settings.google_client_id or not settings.google_client_secret:
             raise ValueError("Missing Google OAuth env vars")
 
@@ -38,20 +40,25 @@ class CalendarService:
             },
             scopes=CALENDAR_SCOPES,
             redirect_uri=settings.google_redirect_uri,
+            code_verifier=code_verifier,
         )
 
     def get_oauth_url(self, user_id: str) -> str:
-        flow = self._create_flow()
+        # PKCE: generate the verifier ourselves so it can round-trip through
+        # the signed state token — the callback builds a fresh Flow and would
+        # otherwise fetch_token with no verifier → invalid_grant.
+        verifier = secrets.token_urlsafe(64)
+        flow = self._create_flow(code_verifier=verifier)
         url, _ = flow.authorization_url(
             access_type="offline",
             prompt="consent",
             include_granted_scopes=True,  # incremental authorization
-            state=google_oauth.build_connect_state(user_id, "calendar_connect"),
+            state=google_oauth.build_connect_state(user_id, "calendar_connect", code_verifier=verifier),
         )
         return url
 
-    async def exchange_code_and_store_tokens(self, code: str, user_id: str):
-        flow = self._create_flow()
+    async def exchange_code_and_store_tokens(self, code: str, user_id: str, code_verifier: str | None = None):
+        flow = self._create_flow(code_verifier=code_verifier)
         await google_oauth.run_sync(flow.fetch_token, code=code)
         # Merge-update: preserve refresh token + scopes granted by other flows.
         await google_oauth.save_google_tokens(user_id, flow.credentials)

@@ -29,11 +29,11 @@ async def gmail_oauth_callback(
 ):
     """Handle Gmail OAuth callback — state is a short-lived signed nonce."""
     try:
-        user_id = google_oauth.verify_connect_state(state, "gmail_connect")
+        user_id, code_verifier = google_oauth.verify_connect_state(state, "gmail_connect")
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
-    await gmail_service.exchange_code_and_store_tokens(code, user_id)
+    await gmail_service.exchange_code_and_store_tokens(code, user_id, code_verifier)
     return RedirectResponse(
         url=f"{settings.frontend_url}/trips?gmail=connected",
         status_code=302,

@@ -80,8 +80,13 @@ def decrypt_secret(value: str | None) -> str | None:
 # OAuth connect-state nonces (never the session JWT)
 # ---------------------------------------------------------------------------
 
-def build_connect_state(user_id: str, purpose: str) -> str:
-    """Signed, short-lived OAuth state token carrying user_id internally."""
+def build_connect_state(user_id: str, purpose: str, code_verifier: str | None = None) -> str:
+    """Signed, short-lived OAuth state token carrying user_id internally.
+
+    `code_verifier` is the PKCE verifier generated for the authorization
+    request — the callback flow is a fresh object, so it must round-trip
+    through the state token or token exchange fails with invalid_grant.
+    """
     now = datetime.now(timezone.utc)
     payload = {
         "uid": str(user_id),
@@ -90,11 +95,13 @@ def build_connect_state(user_id: str, purpose: str) -> str:
         "iat": now,
         "exp": now + timedelta(minutes=CONNECT_STATE_TTL_MINUTES),
     }
+    if code_verifier:
+        payload["cv"] = code_verifier
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
-def verify_connect_state(state: str, purpose: str) -> str:
-    """Validate a connect-state token; returns user_id. Raises ValueError."""
+def verify_connect_state(state: str, purpose: str) -> tuple[str, str | None]:
+    """Validate a connect-state token; returns (user_id, code_verifier). Raises ValueError."""
     try:
         payload = jwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
     except jwt.InvalidTokenError as e:
@@ -104,7 +111,7 @@ def verify_connect_state(state: str, purpose: str) -> str:
     user_id = payload.get("uid")
     if not user_id:
         raise ValueError("State token missing user id")
-    return str(user_id)
+    return str(user_id), payload.get("cv")
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Auth routes — register, login, me, update profile, Google OAuth."""
 
 import jwt
+import secrets
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
@@ -128,6 +129,10 @@ async def google_auth_start(redirect: str = Query("/trips")):
 
     from google_auth_oauthlib.flow import Flow
 
+    # PKCE: the callback rebuilds a fresh Flow, so we generate the verifier
+    # ourselves and round-trip it through the signed state token — otherwise
+    # fetch_token runs without it → invalid_grant "Missing code verifier".
+    code_verifier = secrets.token_urlsafe(64)
     flow = Flow.from_client_config(
         {
             "web": {
@@ -140,11 +145,13 @@ async def google_auth_start(redirect: str = Query("/trips")):
         },
         scopes=_GOOGLE_SCOPES,
         redirect_uri=_google_auth_redirect_uri(),
+        code_verifier=code_verifier,
     )
 
     state_payload = {
         "redirect": redirect,
         "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
+        "cv": code_verifier,
     }
     state_token = jwt.encode(state_payload, settings.jwt_secret, algorithm="HS256")
 
@@ -186,6 +193,7 @@ async def google_auth_callback(
         },
         scopes=_GOOGLE_SCOPES,
         redirect_uri=_google_auth_redirect_uri(),
+        code_verifier=state_payload.get("cv"),
     )
 
     flow.fetch_token(code=code)

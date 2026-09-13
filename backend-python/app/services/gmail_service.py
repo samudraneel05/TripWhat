@@ -18,6 +18,7 @@ import base64
 import html as html_lib
 import json
 import re
+import secrets
 from datetime import datetime, timezone
 
 from google_auth_oauthlib.flow import Flow
@@ -100,7 +101,7 @@ _RESERVATION_TYPE_MAP = {
 
 
 class GmailService:
-    def _create_flow(self) -> Flow:
+    def _create_flow(self, code_verifier: str | None = None) -> Flow:
         if not settings.google_client_id or not settings.google_client_secret:
             raise ValueError("Missing Google OAuth env vars")
 
@@ -116,20 +117,25 @@ class GmailService:
             },
             scopes=GMAIL_SCOPES,
             redirect_uri=settings.gmail_redirect_uri,
+            code_verifier=code_verifier,
         )
 
     def get_oauth_url(self, user_id: str) -> str:
-        flow = self._create_flow()
+        # PKCE: generate the verifier ourselves so it can round-trip through
+        # the signed state token — the callback builds a fresh Flow and would
+        # otherwise fetch_token with no verifier → invalid_grant.
+        verifier = secrets.token_urlsafe(64)
+        flow = self._create_flow(code_verifier=verifier)
         url, _ = flow.authorization_url(
             access_type="offline",
             prompt="consent",
             include_granted_scopes=True,  # incremental authorization
-            state=google_oauth.build_connect_state(user_id, "gmail_connect"),
+            state=google_oauth.build_connect_state(user_id, "gmail_connect", code_verifier=verifier),
         )
         return url
 
-    async def exchange_code_and_store_tokens(self, code: str, user_id: str):
-        flow = self._create_flow()
+    async def exchange_code_and_store_tokens(self, code: str, user_id: str, code_verifier: str | None = None):
+        flow = self._create_flow(code_verifier=code_verifier)
         await google_oauth.run_sync(flow.fetch_token, code=code)
         # Merge-update: keep scopes/refresh token granted by other flows.
         await google_oauth.save_google_tokens(user_id, flow.credentials)

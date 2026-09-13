@@ -24,11 +24,11 @@ async def oauth_callback(
     state: str = Query(...),
 ):
     try:
-        user_id = google_oauth.verify_connect_state(state, "calendar_connect")
+        user_id, code_verifier = google_oauth.verify_connect_state(state, "calendar_connect")
     except ValueError as e:
         raise HTTPException(status_code=401, detail=str(e))
 
-    await calendar_service.exchange_code_and_store_tokens(code, user_id)
+    await calendar_service.exchange_code_and_store_tokens(code, user_id, code_verifier)
     return RedirectResponse(
         url=f"{settings.frontend_url}/trips?gcal=connected",
         status_code=302,
