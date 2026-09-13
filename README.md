@@ -107,6 +107,52 @@ LANGSMITH_TRACING=true
 
 ---
 
+## How we built it — the engineering notes
+
+This section is the honest version: what we tried, what broke, and why the architecture looks the way it does.
+
+### The reel problem: three approaches, benchmarked
+
+"Extract places from a shared video link" sounds simple until you try it. We ran three independent proof-of-concepts against real reels before writing the production pipeline:
+
+| Approach | Cost/link | Latency | What we learned |
+|---|---|---|---|
+| yt-dlp metadata + LLM parse | ~free | ~5–20s | When captions list places it's near-lossless — 88/88 candidates resolved to real Place IDs. But ~30–40% of reels are caption-free "vibe" videos, and TikTok blocks anonymous access entirely. |
+| Download → Whisper + frame OCR | ~$0.35–0.50 | ~25–40s | Recovers places that exist only in audio or on-screen text — one London reel yielded 10 places vs 3 from metadata, three of which were only ever visible as text overlays. Expensive, and Whisper hallucinates on music-only audio. |
+| Apify reel scraper | ~$0.003 | ~10–20s | The reliability hedge — survives Instagram's login walls and datacenter-IP blocks that kill yt-dlp. |
+
+So the production answer is a **cascade ordered by cost**: try metadata first, escalate to Gemini video understanding only when metadata yield is low, fall back to Apify when access is blocked outright. Typical link costs nothing; hard links cost cents. We dropped the planned Whisper+frames tier as primary once Gemini video understanding proved it could read audio and frames in a single call — it stays as a fallback path.
+
+Two dead ends worth documenting: Instagram's oEmbed API (explicitly prohibited for deriving data, needs Meta App Review) and community Duffel MCP servers (read-only — no order creation, so we integrated the REST API directly).
+
+### The resolution problem: place names are ambiguous
+
+LLMs extract "Sorrento" and naive `places:searchText` with `pageSize: 1` resolves it to the Amalfi Coast *region* — or worse, a restaurant named Sorrento in Ohio. The fix that survived testing: fetch top-3 candidates, re-rank by token overlap between the extracted name and each candidate's display name + address, and apply a specificity filter that drops country-level noise unless the country is itself the stop. Extraction and resolution are different problems — an agent that conflates them saves wrong places confidently.
+
+### Agent state: the checkpoint is the truth
+
+Early versions kept trip state in app-level DB rows and mirrored it into the agent. Two sources of truth meant drift — a manual itinerary edit or a Gmail booking import would silently diverge from what the agent believed. The rewrite made the **LangGraph Postgres checkpointer authoritative**: every external mutation (manual edits, booking imports, saved-trip snapshots) writes back into the checkpoint via `aupdate_state`, and reads go through it. Concurrent sends on the same conversation return a clean 409 instead of interleaving corruptly.
+
+The same decision killed a custom pending-widget mechanism for follow-up questions. Native `interrupt()` / `Command(resume=...)` is strictly better: pending questions live in the checkpoint, so they survive reloads, reconnects, and multi-question chains — no bespoke protocol to maintain.
+
+### OAuth: three real bugs, all shipped fixes
+
+Google OAuth integration produced three distinct production bugs, each with a non-obvious root cause — worth listing because they're the kind of thing that only surfaces when you actually wire the flow:
+
+1. **`invalid_grant: Missing code verifier`** — `google_auth_oauthlib` generates a PKCE verifier on the `Flow` that builds the auth URL, but the callback constructed a *fresh* `Flow`. Fixed by generating the verifier ourselves and carrying it through the signed, short-lived state JWT.
+2. **Scope mismatch warning-as-error** — requesting shorthand `email`/`profile` while Google returns canonical URIs trips oauthlib's scope validation. Fixed by requesting full URIs.
+3. **`invalid_request` on `include_granted_scopes`** — Python `True` serializes as `"True"`; Google demands `"true"`. One character of casing, one blocked consent screen.
+
+Also: user profile comes from ID-token claims, not a second `userinfo` call — one fewer network dependency on the critical path, and one fewer thing to DNS-fail.
+
+### Parallelism with a budget
+
+Itinerary building fans out searches per city and per category — but unbounded fan-out against rate-limited APIs just moves the bottleneck to retries. Everything parallel runs through semaphores (search concurrency, image prefetch pool), and Google Places results are cached per query — the second itinerary touching "restaurants in Kyoto" is free.
+
+### What we'd harden next
+
+Honest limitations: TikTok needs the Apify tier (anonymous access is ~0%); the Whisper fallback path needs `ffmpeg` installed; link-import socket events are broadcast rather than scoped to per-user rooms; and Duffel runs in test mode — swapping `duffel_test_` for a live token is the only change required for real bookings.
+
 ## Why TripWhat
 
 The travel-AI category is full of demos that stop at a bulleted list. TripWhat is the only one where the loop actually closes: the reel you scrolled past becomes saved places, the saved places become an itinerary, the itinerary becomes calendar events and a confirmed booking — and your real inbox bookings fold in along the way. Every step is a real API call to a real external system, and every step is observable in LangSmith.
@@ -121,3 +167,17 @@ The travel-AI category is full of demos that stop at a bulleted list. TripWhat i
 - **Production-grade engineering.** Durable agent state via Postgres checkpointing, PKCE-secured OAuth with encrypted tokens and incremental scope merging, Redis-backed resumable streaming, bounded-concurrency enrichment, checkpoint-synced manual edits.
 - **Human-in-the-loop done right.** Questions suspend the graph via `interrupt()` and resume with `Command(resume)` — pending prompts survive reloads and multi-question chains.
 - **Original mechanism.** The reel→places cascade (metadata → video understanding → scraper fallback → Places re-rank) is a genuinely novel pipeline for this category — inspiration ingestion is the unsolved edge of travel planning.
+- **Decisions are documented, not just code.** The engineering notes above show real benchmarked tradeoffs — three extraction POCs with cost/latency/coverage numbers, a state-management rewrite when two sources of truth drifted, and three OAuth bugs found and fixed in production. This is a project that was reasoned about, not just assembled.
+
+## What to look at in the code
+
+- `backend-python/app/services/link_import.py` — the tiered link→places cascade
+- `backend-python/app/agents/travel_agent.py` — agent orchestration, checkpoint state, interrupt resume
+- `backend-python/app/services/duffel_service.py` — flight search → real order creation
+- `backend-python/app/services/google_oauth.py` — encrypted tokens, incremental scopes, PKCE state
+- `backend-python/app/services/checkpoint_sync.py` — manual edits synced into live agent state
+- `backend-python/tests/eval/` — 80 benchmark cases, LLM judges, LangSmith integration
+
+## Team
+
+- _Add team member names + emails here_
