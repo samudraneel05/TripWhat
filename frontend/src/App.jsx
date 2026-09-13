@@ -1,9 +1,9 @@
-import React from "react";
 import {
   BrowserRouter as Router,
   Routes,
   Route,
   Navigate,
+  useLocation,
 } from "react-router-dom";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
@@ -17,9 +17,11 @@ import TripsPage from "./pages/TripsPage.tsx";
 import TripWorkspacePage from "./pages/TripWorkspacePage.tsx";
 import NewTripPage from "./pages/NewTripPage.tsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
+import GoogleAuthSuccess from "./pages/GoogleAuthSuccess.jsx";
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
 
   if (loading) {
     return (
@@ -28,7 +30,11 @@ function ProtectedRoute({ children }) {
       </div>
     );
   }
-  if (!user) return <Navigate to="/login" />;
+  if (!user) {
+    // Preserve the query string so login/signup can redirect back with it
+    const redirect = `/login${location.search || ""}`;
+    return <Navigate to={redirect} />;
+  }
   return <>{children}</>;
 }
 
@@ -41,6 +47,7 @@ function AppContent() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
+        <Route path="/auth/google/success" element={<GoogleAuthSuccess />} />
 
         <Route
           path="/trips"

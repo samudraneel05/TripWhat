@@ -1,0 +1,161 @@
+.hero-globe {
+  position: relative;
+  isolation: isolate;
+  flex: none;
+  width: min(100%, 900px);
+  height: 360px;
+  margin: 28px auto 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+  -webkit-mask-image: linear-gradient(#000 0%, #000 67%, transparent 100%);
+  mask-image: linear-gradient(#000 0%, #000 67%, transparent 100%);
+}
+
+.hero-globe-canvas {
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+}
+
+.hero-globe-canvas:active {
+  cursor: grabbing;
+}
+
+.hero-globe[data-dragging="true"] .hero-globe-canvas {
+  cursor: grabbing;
+}
+
+.hero-globe::after {
+  position: absolute;
+  z-index: 3;
+  inset: 70% 0 0;
+  background: linear-gradient(#fdfcf900, #fdfcf9);
+  content: "";
+}
+
+.hero-globe-canvas,
+.hero-globe-destinations {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.hero-globe-canvas {
+  z-index: 1;
+  opacity: 0;
+}
+
+.hero-globe-destinations {
+  z-index: 2;
+}
+
+.hero-globe-fallback {
+  position: absolute;
+  top: 15px;
+  left: 8%;
+  width: 84%;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 50%;
+  background: radial-gradient(circle at 34% 26%, #fdf8e8, #f5eed6 50%, #e0d4b0);
+  box-shadow: inset -20px -14px 42px #8a754818, 0 0 20px #d4c39a10;
+}
+
+.hero-globe-fallback svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: #dccaa2;
+  opacity: 0.86;
+}
+
+.hero-globe[data-rendered="true"] .hero-globe-fallback {
+  visibility: hidden;
+}
+
+.hero-globe[data-rendered="true"] .hero-globe-canvas {
+  opacity: 1;
+}
+
+.hero-globe-marker {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  visibility: hidden;
+  transform-origin: 0 0;
+  will-change: transform, opacity;
+}
+
+.hero-globe-leader {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 1px;
+  background: #8e734c9c;
+  transform-origin: 0 50%;
+}
+
+.hero-globe-dot {
+  position: absolute;
+  top: -3px;
+  left: -3px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid #fff8e6;
+  border-radius: 50%;
+  background: #937143;
+  box-shadow: 0 0 0 3px #fff8e632;
+}
+
+.hero-globe-card {
+  position: absolute;
+  box-sizing: border-box;
+  width: 116px;
+  padding: 4px 4px 0;
+  overflow: hidden;
+  border: 1px solid #fffdf9;
+  border-radius: 7px;
+  background: #fffdf9;
+  box-shadow: 0 9px 22px #5c462e24, 0 2px 5px #5c462e14;
+  transform: translateX(-50%) rotate(var(--hero-globe-card-angle, 0deg));
+  transform-origin: 50% 100%;
+  text-align: left;
+}
+
+.hero-globe-card img {
+  display: block;
+  width: 100%;
+  height: 80px;
+  border-radius: 4px;
+  background: #ded3bd;
+  object-fit: cover;
+  filter: saturate(0.78) contrast(0.96);
+}
+
+.hero-globe-card-label {
+  display: block;
+  overflow: hidden;
+  padding: 7px 4px 8px;
+  color: #5c4d39;
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 700px) {
+  .hero-globe {
+    height: 270px;
+    margin-top: 22px;
+    -webkit-mask-image: linear-gradient(#000 0%, #000 60%, transparent 100%);
+    mask-image: linear-gradient(#000 0%, #000 60%, transparent 100%);
+  }
+}
