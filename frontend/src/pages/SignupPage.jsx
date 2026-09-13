@@ -34,6 +34,12 @@ export default function SignupPage() {
     if (token) navigate(postAuthPath, { replace: true });
   }, [navigate, postAuthPath]);
 
+  useEffect(() => {
+    if (searchParams.get("error") === "google_signin_failed") {
+      setError("Google sign-in failed. Please try again.");
+    }
+  }, [searchParams]);
+
   const handleChange = (e) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));

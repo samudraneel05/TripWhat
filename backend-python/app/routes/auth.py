@@ -1,5 +1,6 @@
 """Auth routes — register, login, me, update profile, Google OAuth."""
 
+import asyncio
 import jwt
 import secrets
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,7 @@ from app.schemas.auth import (
     RegisterRequest, LoginRequest, AuthResponse,
     UserResponse, UpdateProfileRequest,
 )
+from app.utils.logger import logger
 import bcrypt
 
 router = APIRouter()
@@ -173,8 +175,11 @@ async def google_auth_callback(
 ):
     """Handle the Google OAuth callback — create or log in the user."""
     from google_auth_oauthlib.flow import Flow
-    from googleapiclient.discovery import build
-    import json
+
+    frontend_base = settings.frontend_url.rstrip("/")
+    oauth_error = RedirectResponse(
+        url=f"{frontend_base}/login?error=google_signin_failed", status_code=302
+    )
 
     # Verify state
     try:
@@ -198,18 +203,29 @@ async def google_auth_callback(
         code_verifier=state_payload.get("cv"),
     )
 
-    flow.fetch_token(code=code)
-    credentials = flow.credentials
+    # fetch_token performs blocking I/O — keep it off the event loop.
+    try:
+        await asyncio.to_thread(flow.fetch_token, code=code)
+    except Exception:
+        logger.exception("Google OAuth token exchange failed")
+        return oauth_error
 
-    # Get user info from Google
-    userinfo_service = build("oauth2", "v2", credentials=credentials)
-    userinfo = userinfo_service.userinfo().get().execute()
-    google_email = userinfo.get("email", "")
-    google_name = userinfo.get("name", google_email.split("@")[0] if google_email else "Traveler")
-    google_picture = userinfo.get("picture")
+    # The ID token (openid scope) already carries the profile claims, so the
+    # extra googleapis.com userinfo call isn't needed. It arrives directly from
+    # Google's token endpoint over TLS, so signature verification is skipped.
+    id_token = getattr(flow.credentials, "id_token", None)
+    try:
+        claims = jwt.decode(id_token, options={"verify_signature": False}) if id_token else {}
+    except jwt.InvalidTokenError:
+        claims = {}
+
+    google_email = claims.get("email", "")
+    google_name = claims.get("name", google_email.split("@")[0] if google_email else "Traveler")
+    google_picture = claims.get("picture")
 
     if not google_email:
-        raise HTTPException(status_code=400, detail="Could not retrieve email from Google")
+        logger.warning("Google OAuth callback: ID token missing email claim")
+        return oauth_error
 
     # Find or create user
     result = await db.execute(select(User).where(User.email == google_email))
@@ -233,7 +249,6 @@ async def google_auth_callback(
     token = _create_token(user.id)
 
     # Redirect to frontend with token
-    frontend_base = settings.frontend_url.rstrip("/")
     redirect_clean = redirect.lstrip("/")
     return RedirectResponse(
         url=f"{frontend_base}/auth/google/success?token={token}&redirect={redirect_clean}",
