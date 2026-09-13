@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useUIStore } from '../stores/uiStore';
+import { gmailApi } from '../lib/api';
 
 export default function Sidebar() {
   const { user, logout } = useAuth();
@@ -13,7 +14,23 @@ export default function Sidebar() {
   const location = useLocation();
   const navigate = useNavigate();
   const [showProfileMenu, setShowProfileMenu] = useState(false);
+  const [gmailConnected, setGmailConnected] = useState(false);
+  const [gmailConnecting, setGmailConnecting] = useState(false);
   const profileRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    gmailApi.status().then((res) => setGmailConnected(res.data.connected)).catch(() => {});
+  }, [location.search]);
+
+  const handleConnectGmail = async () => {
+    setGmailConnecting(true);
+    try {
+      const res = await gmailApi.oauthUrl();
+      window.location.href = res.data.url;
+    } catch {
+      setGmailConnecting(false);
+    }
+  };
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -109,7 +126,7 @@ export default function Sidebar() {
       {/* Secondary nav */}
       <nav className="px-3 space-y-0.5">
         <Link
-          to="/trips"
+          to="/new?tab=bookings"
           className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-[var(--muted)] hover:bg-[var(--sage)] hover:text-[var(--ink)] ${
             collapsed ? 'justify-center' : ''
           }`}
@@ -119,7 +136,7 @@ export default function Sidebar() {
           {!collapsed && <span>Bookings</span>}
         </Link>
         <Link
-          to="/trips"
+          to="/new?tab=saved"
           className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm transition-colors text-[var(--muted)] hover:bg-[var(--sage)] hover:text-[var(--ink)] ${
             collapsed ? 'justify-center' : ''
           }`}
@@ -139,12 +156,29 @@ export default function Sidebar() {
         <div className="px-3 mt-4 space-y-2">
           <div className="rounded-lg border border-[var(--border)] p-3">
             <div className="flex items-center gap-2 mb-1">
-              <Mail className="w-3.5 h-3.5 text-[var(--muted)]" />
-              <span className="text-xs font-medium text-[var(--ink)]">Connect Gmail</span>
+              <Mail className={`w-3.5 h-3.5 ${gmailConnected ? 'text-green-600' : 'text-[var(--muted)]'}`} />
+              <span className="text-xs font-medium text-[var(--ink)]">
+                {gmailConnected ? 'Gmail connected' : 'Connect Gmail'}
+              </span>
             </div>
-            <p className="text-xs text-[var(--muted)] leading-relaxed">
-              Auto-import flight & hotel bookings
-            </p>
+            {gmailConnected ? (
+              <p className="text-xs text-[var(--muted)] leading-relaxed">
+                Booking confirmations auto-import into Bookings.
+              </p>
+            ) : (
+              <>
+                <p className="text-xs text-[var(--muted)] leading-relaxed mb-2">
+                  Auto-import flight & hotel bookings
+                </p>
+                <button
+                  onClick={handleConnectGmail}
+                  disabled={gmailConnecting}
+                  className="w-full px-2.5 py-1.5 rounded-md bg-[var(--ink)] text-white text-xs font-medium hover:bg-[#292524] transition-colors disabled:opacity-50"
+                >
+                  {gmailConnecting ? 'Connecting…' : 'Connect'}
+                </button>
+              </>
+            )}
           </div>
         </div>
       )}

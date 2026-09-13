@@ -7,6 +7,7 @@ import { PlaceDetailPanel } from '../components/PlaceDetailPanel';
 import { FlightDetailPanel } from '../components/FlightDetailPanel';
 import { PlanTab } from '../components/PlanTab';
 import { SavedTab } from '../components/SavedTab';
+import { BookingsTab } from '../components/BookingsTab';
 import type { FlightOption } from '../components/FlightCard';
 import { useTripStore } from '../stores/tripStore';
 import { useChatStore } from '../stores/chatStore';
@@ -37,6 +38,12 @@ export default function NewTripPage() {
     resetRef.current = true;
     useChatStore.getState().reset();
   }
+
+  // Sidebar links land here with ?tab=bookings|saved — honor the requested tab.
+  useEffect(() => {
+    const t = searchParams.get('tab');
+    if (t === 'bookings' || t === 'saved') setActiveTab(t);
+  }, [searchParams, setActiveTab]);
 
   useEffect(() => {
     connectSocket();
@@ -218,9 +225,7 @@ export default function NewTripPage() {
               )
             )}
             {activeTab === 'bookings' && (
-              <div className="flex flex-col items-center justify-center h-full py-12 text-center">
-                <p className="text-sm text-[var(--muted)]">Bookings will appear here once connected.</p>
-              </div>
+              <BookingsTab tripId={tripIdRef.current ? String(tripIdRef.current) : undefined} />
             )}
             {activeTab === 'saved' && <SavedTab />}
           </div>

@@ -35,7 +35,7 @@ async def gmail_oauth_callback(
 
     await gmail_service.exchange_code_and_store_tokens(code, user_id, code_verifier)
     return RedirectResponse(
-        url=f"{settings.frontend_url}/trips?gmail=connected",
+        url=f"{settings.frontend_url}/new?tab=bookings&gmail=connected",
         status_code=302,
     )
 
