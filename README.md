@@ -8,18 +8,14 @@ Not a chatbot that suggests. An agent that does.
 
 ## Demo video
 
-> **[Watch the 2-minute demo](<VIDEO_URL_HERE>)**
+> Watch the 2-minute demo
 
-<details>
-<summary><b>Demo script</b> (what to record — ~110 seconds)</summary>
 
-1. **Hook (0:00–0:10)** — "Every travel AI gives you a list. This one books the trip." Show the landing page briefly.
-2. **Reel → places (0:10–0:35)** — Open the Saved tab, paste an Instagram reel link. Show the live progress states while the pipeline runs: metadata → Gemini video understanding → Places resolution. The saved place card appears with photo, rating, address. *"It watched the video — those places were never in the caption."*
-3. **Chat → itinerary (0:35–0:60)** — Ask for a trip using the saved place. Show the agent's question cards (native interrupts), the parallel search activity indicators, and the itinerary building live on the map.
-4. **Gmail + Calendar (0:60–0:85)** — Click Connect Gmail in the sidebar, OAuth round-trip, bookings list populates, "Add to trip". Show a Calendar event created.
-5. **Book it (0:85–1:45)** — "Search flights for this trip" → offers render → "book the first one" → agent confirms passenger details → **real Duffel order + booking reference on screen**.
-6. **Proof (1:45–2:00)** — Flash the LangSmith trace view and the eval benchmark output. *"80-case eval suite, full trace observability, 170 automated tests."*
-</details>
+https://github.com/user-attachments/assets/baecf303-e5e1-4384-b076-7da93867e4f0
+
+
+
+
 
 ## The flow
 
@@ -120,6 +116,12 @@ The travel-AI category is full of demos that stop at a bulleted list. TripWhat i
 - **12+ external apps, one coherent story.** Instagram/TikTok/YouTube, Gemini, Places, Gmail, Calendar, Duffel, OpenAI, Tavily, OpenTripMap, Geoapify, SerpApi, OpenWeather — each carries real weight in a single user journey, not bolted on to hit a count.
 - **Real actions, not read-only demos.** The agent creates calendar events, merges email bookings into trip state, and creates actual Duffel orders with booking references. Test mode is real infrastructure — the same code path runs live with a production token.
 - **Evaluation is a feature, not an afterthought.** 170 automated tests, an 80-case LLM-judged benchmark, LangSmith datasets + `evaluate()` integration, and full trace observability on every agent run — the "show how you know it works" criterion has a concrete answer.
+
+
+https://github.com/user-attachments/assets/68930966-7072-4364-a773-216e74dc9bf0
+
+<img width="1467" height="811" alt="Screenshot 2026-09-14 at 4 57 34 AM" src="https://github.com/user-attachments/assets/cca82f3e-d02c-42dd-88b8-3f88e7d5c145" />
+
 - **Production-grade engineering.** Durable agent state via Postgres checkpointing, PKCE-secured OAuth with encrypted tokens and incremental scope merging, Redis-backed resumable streaming, bounded-concurrency enrichment, checkpoint-synced manual edits.
 - **Human-in-the-loop done right.** Questions suspend the graph via `interrupt()` and resume with `Command(resume)` — pending prompts survive reloads and multi-question chains.
 - **Original mechanism.** The reel→places cascade (metadata → video understanding → scraper fallback → Places re-rank) is a genuinely novel pipeline for this category — inspiration ingestion is the unsolved edge of travel planning.
