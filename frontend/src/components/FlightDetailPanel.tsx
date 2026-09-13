@@ -51,7 +51,7 @@ export function FlightDetailPanel({ flight, onClose }: Props) {
               </div>
               <div className="text-right shrink-0">
                 <p className="text-lg font-semibold text-[var(--ink)]">
-                  {flight.currency} {flight.price.toLocaleString()}
+                  {flight.price ? `${flight.currency} ${flight.price.toLocaleString()}` : '—'}
                 </p>
                 <p className="text-[10px] text-[var(--muted)] capitalize">{flight.type}</p>
               </div>

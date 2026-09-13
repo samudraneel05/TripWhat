@@ -21,7 +21,7 @@ interface SearchResult {
   photo_url?: string;
 }
 
-export function AddItemInline({ day, city, onAdd, onCancel }: AddItemInlineProps) {
+export function AddItemInline({ day, onAdd, onCancel }: AddItemInlineProps) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);

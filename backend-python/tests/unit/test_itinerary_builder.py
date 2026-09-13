@@ -114,8 +114,11 @@ async def test_curate_activities_llm_no_used_names_no_clause():
 
 
 @pytest.mark.asyncio
-async def test_build_single_city_accumulates_used_names():
-    """Verify that used_names accumulates across days in single-city build."""
+async def test_build_single_city_parallel_curation():
+    """Days are curated concurrently — no day sees another's picks at call time.
+
+    Cross-day dedup is reconciled post-hoc via _reconcile_used_names.
+    """
     call_args = []
 
     original = itinerary_builder._search_and_curate_activities
@@ -133,26 +136,56 @@ async def test_build_single_city_accumulates_used_names():
 
     itinerary_builder._search_and_curate_activities = mock_search
     try:
-        await itinerary_builder.build({"destination": "Tokyo", "duration": 3})
+        result = await itinerary_builder.build({"destination": "Tokyo", "duration": 3})
     finally:
         itinerary_builder._search_and_curate_activities = original
 
     assert len(call_args) == 3
-    # Day 1: no used names
-    assert call_args[0]["used_names"] == []
-    # Day 2: should have day 1's places
-    assert "Place D1A" in call_args[1]["used_names"]
-    assert "Place D1B" in call_args[1]["used_names"]
-    assert "Place D1C" in call_args[1]["used_names"]
-    # Day 3: should have day 1 and day 2's places
-    assert "Place D1A" in call_args[2]["used_names"]
-    assert "Place D2A" in call_args[2]["used_names"]
-    assert len(call_args[2]["used_names"]) == 6
+    # Parallel curation: every day starts with an empty used_names
+    assert all(c["used_names"] == [] for c in call_args)
+    # All days were still curated (order of completion may vary)
+    assert sorted(c["day"] for c in call_args) == [1, 2, 3]
+    # All curated activities land in the itinerary
+    names = [
+        slot["activity"]["name"]
+        for day in result["itinerary"]["days"]
+        for slot in day["timeSlots"]
+    ]
+    assert len(names) == 9
+
+
+def test_reconcile_used_names_swaps_duplicates():
+    """Post-hoc dedup: a duplicated pick is swapped for an unused cluster place."""
+    used: set[str] = set()
+    day1 = [{"name": "Temple A", "period": "morning"}, {"name": "Park B", "period": "afternoon"}]
+    day1 = itinerary_builder._reconcile_used_names(day1, [], used)
+    assert [a["name"] for a in day1] == ["Temple A", "Park B"]
+    assert used == {"temple a", "park b"}
+
+    cluster2 = [
+        {"name": "Temple A", "rating": 4.9},   # already used by day 1
+        {"name": "Museum C", "rating": 4.8},   # unused, high-rated candidate
+        {"name": "Gallery D", "rating": 4.1},  # unused, lower-rated candidate
+    ]
+    day2 = [{"name": "Temple A", "period": "morning"}, {"name": "River E", "period": "evening"}]
+    day2 = itinerary_builder._reconcile_used_names(day2, cluster2, used)
+    # "Temple A" was a duplicate → swapped for the best unused cluster place
+    assert [a["name"] for a in day2] == ["Museum C", "River E"]
+    # Swap preserves the original period
+    assert day2[0]["period"] == "morning"
+
+
+def test_reconcile_used_names_keeps_dup_when_no_replacement():
+    """If the day's cluster has no unused places, the duplicate pick is kept."""
+    used = {"temple a"}
+    day = [{"name": "Temple A", "period": "morning"}]
+    result = itinerary_builder._reconcile_used_names(day, [{"name": "Temple A"}], used)
+    assert result[0]["name"] == "Temple A"
 
 
 @pytest.mark.asyncio
-async def test_build_multi_city_resets_used_names_per_city():
-    """Verify that used_names resets when switching cities in multi-city build."""
+async def test_build_multi_city_parallel_curation_per_city():
+    """All days across all cities curate in parallel with empty used_names."""
     call_args = []
 
     original = itinerary_builder._search_and_curate_activities
@@ -171,7 +204,7 @@ async def test_build_multi_city_resets_used_names_per_city():
 
     itinerary_builder._search_and_curate_activities = mock_search
     try:
-        await itinerary_builder.build({
+        result = await itinerary_builder.build({
             "destination": "Tokyo",
             "duration": 4,
             "cities": [
@@ -184,18 +217,15 @@ async def test_build_multi_city_resets_used_names_per_city():
         itinerary_builder._search_and_curate_activities = original
 
     assert len(call_args) == 4
-    # Days are numbered continuously across cities (day_idx + 1)
-    # Tokyo day 1 (global day 1): empty
-    assert call_args[0]["city"] == "Tokyo"
-    assert call_args[0]["used_names"] == []
-    # Tokyo day 2 (global day 2): has Tokyo day 1 places
-    assert call_args[1]["city"] == "Tokyo"
-    assert "Tokyo D1A" in call_args[1]["used_names"]
-    # Kyoto day 1 (global day 3): reset — should NOT have Tokyo places
-    assert call_args[2]["city"] == "Kyoto"
-    assert call_args[2]["used_names"] == []
-    assert "Tokyo D1A" not in call_args[2]["used_names"]
-    # Kyoto day 2 (global day 4): has Kyoto day 3 places, but NOT Tokyo places
-    assert call_args[3]["city"] == "Kyoto"
-    assert "Kyoto D3A" in call_args[3]["used_names"]
+    # Parallel curation: every day starts with an empty used_names
+    assert all(c["used_names"] == [] for c in call_args)
+    # 2 days per city, globally numbered
+    tokyo_days = sorted(c["day"] for c in call_args if c["city"] == "Tokyo")
+    kyoto_days = sorted(c["day"] for c in call_args if c["city"] == "Kyoto")
+    assert tokyo_days == [1, 2]
+    assert kyoto_days == [3, 4]
+    # Day locations still assigned correctly
+    days = result["itinerary"]["days"]
+    assert days[0]["location"] == "Tokyo"
+    assert days[2]["location"] == "Kyoto"
     assert "Tokyo D1A" not in call_args[3]["used_names"]

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import String, LargeBinary, DateTime, Integer
+from sqlalchemy import String, LargeBinary, Integer
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base

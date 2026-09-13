@@ -2,20 +2,88 @@
 
 from langchain_core.tools import tool, InjectedToolCallId
 from langchain_core.messages import ToolMessage
-from langgraph.prebuilt import InjectedState
-from langgraph.config import get_stream_writer
+from langgraph.prebuilt import InjectedState, ToolRuntime
 from langgraph.types import Command
 from typing import Annotated
 
+from app.agents.state import resolve_build_cities
 from app.services.itinerary_builder import itinerary_builder
 from app.services.itinerary_editor import itinerary_editor
+from app.services import progress_bus
 from app.utils.logger import logger
+
+
+def _resolve_conversation_id(runtime: ToolRuntime | None) -> str:
+    """Pull the conversation id off the injected RunnableConfig.
+
+    chat_stream sets config["metadata"]["conversation_id"] and
+    config["configurable"]["thread_id"]; either works. Falls back to
+    langgraph's get_config() contextvar when runtime isn't injected.
+    """
+    cfg = getattr(runtime, "config", None) or {}
+    cid = (cfg.get("metadata") or {}).get("conversation_id") \
+        or (cfg.get("configurable") or {}).get("thread_id")
+    if cid:
+        return cid
+    try:
+        from langgraph.config import get_config
+        cfg = get_config() or {}
+        cid = (cfg.get("metadata") or {}).get("conversation_id") \
+            or (cfg.get("configurable") or {}).get("thread_id")
+        if cid:
+            return cid
+    except Exception:
+        pass
+    # Last resort: the progress-bus contextvar set by chat_stream's register()
+    # — tool coroutines inherit it from the parent task.
+    return progress_bus.current()
+
+
+def _resolve_user_id(runtime: ToolRuntime | None):
+    """Pull the user id off the injected RunnableConfig.
+
+    chat_stream sets config["configurable"]["user_id"] and mirrors it in
+    config["metadata"]["user_id"]. Falls back to langgraph's get_config()
+    contextvar when runtime isn't injected.
+    """
+    cfg = getattr(runtime, "config", None) or {}
+    uid = (cfg.get("configurable") or {}).get("user_id") \
+        or (cfg.get("metadata") or {}).get("user_id")
+    if uid:
+        return uid
+    try:
+        from langgraph.config import get_config
+        cfg = get_config() or {}
+        return (cfg.get("configurable") or {}).get("user_id") \
+            or (cfg.get("metadata") or {}).get("user_id")
+    except Exception:
+        return None
+
+
+async def _get_user_interests(user_id) -> list[str]:
+    """Read preferences.interests off the user's profile (set on ProfilePage)."""
+    try:
+        from sqlalchemy import select
+        from app.database import async_session
+        from app.models import User
+
+        async with async_session() as db:
+            result = await db.execute(
+                select(User.preferences).where(User.id == int(user_id))
+            )
+            prefs = result.scalar_one_or_none() or {}
+    except Exception as e:
+        logger.warning(f"[BUILD_ITINERARY] user interests lookup failed: {e}")
+        return []
+    interests = prefs.get("interests")
+    return list(interests) if isinstance(interests, list) else []
 
 
 @tool
 async def build_itinerary(
     state: Annotated[dict, InjectedState],
     tool_call_id: Annotated[str, InjectedToolCallId],
+    runtime: ToolRuntime,
 ) -> Command:
     """Build a complete day-by-day itinerary from the current trip state.
     Call this immediately after the user confirms the route proposal.
@@ -23,34 +91,25 @@ async def build_itinerary(
     a day-by-day plan with time slots. No arguments needed — reads from trip state.
     """
     trip_state = state.get("trip_state") or {}
-    cities = trip_state.get("cities", [])
-    route_proposal = trip_state.get("routeProposal")
-
-    if route_proposal and route_proposal.get("cities"):
-        build_cities = []
-        for i, c in enumerate(route_proposal["cities"]):
-            days = c["nights"] + 1 if i == 0 else c["nights"]
-            build_cities.append({"name": c["name"], "days": days})
-    elif cities:
-        build_cities = []
-        for i, c in enumerate(cities):
-            nights = c.get("nights", 1)
-            days = nights + 1 if i == 0 else nights
-            build_cities.append({"name": c["name"], "days": days})
-    else:
+    build_cities = resolve_build_cities(trip_state)
+    if not build_cities:
         return Command(
             update={
                 "messages": [ToolMessage(content="Cannot build itinerary: no cities in trip state.", tool_call_id=tool_call_id)],
             }
         )
 
+    total_days = sum(c["days"] for c in build_cities)
+    # travelers may be a dict ({"adults": n, ...}) or a plain string like
+    # "couple" (used as travelerType below) — guard before .get().
+    travelers = trip_state.get("travelers")
     ctx = {
         "destination": build_cities[0]["name"],
-        "duration": sum(c["days"] for c in build_cities),
+        "duration": total_days,
         "cities": build_cities,
-        "totalDays": sum(c["days"] for c in build_cities),
+        "totalDays": total_days,
         "travelType": trip_state.get("pace", "moderate"),
-        "numberOfPeople": (trip_state.get("travelers") or {}).get("adults", 1),
+        "numberOfPeople": travelers.get("adults", 1) if isinstance(travelers, dict) else 1,
         "preferences": trip_state.get("preferences", []),
         "tripStyle": trip_state.get("tripStyle", "balanced"),
         "helpWith": trip_state.get("helpWith", []),
@@ -69,16 +128,42 @@ async def build_itinerary(
     if travel_mode:
         ctx["travelMode"] = travel_mode
 
-    # Emit progress events via stream writer
-    try:
-        writer = get_stream_writer()
-        writer({"status": f"Building {len(build_cities)} cities..."})
-        for c in build_cities:
-            writer({"status": f"Searching places in {c['name']}..."})
-    except Exception:
-        pass  # No stream context (non-streaming caller)
+    # Personalization — mirror _auto_build_itinerary: traveler type plus the
+    # user's long-term memories and profile interests feed the builder's
+    # generate_personalized_queries branch. Without this, model-invoked
+    # builds (the primary path) silently lost all personalization.
+    if isinstance(travelers, str) and travelers:
+        ctx["travelerType"] = travelers
 
-    result = await itinerary_builder.build(ctx)
+    user_id = _resolve_user_id(runtime)
+    if user_id:
+        try:
+            from app.services.memory import get_user_memories
+            memories = await get_user_memories(user_id)
+            if memories:
+                ctx["userMemories"] = memories
+        except Exception as e:
+            logger.warning(f"[BUILD_ITINERARY] get_user_memories failed: {e}")
+        interests = await _get_user_interests(user_id)
+        if interests:
+            ctx["userInterests"] = interests
+
+    # Stream builder progress to the UI via the per-conversation progress bus.
+    # (get_stream_writer custom events are dropped for async tools under
+    # astream_events(v3), so we push straight onto chat_stream's queue.)
+    conversation_id = _resolve_conversation_id(runtime)
+    _progress_counter = [0]
+
+    async def _status_cb(update: dict):
+        if not conversation_id:
+            return
+        try:
+            for event in progress_bus.builder_update_events(update, _progress_counter):
+                progress_bus.emit(conversation_id, event)
+        except Exception as e:
+            logger.warning(f"[BUILD_ITINERARY] progress emit failed: {e}")
+
+    result = await itinerary_builder.build(ctx, status_cb=_status_cb)
     if not result:
         return Command(
             update={
@@ -89,16 +174,9 @@ async def build_itinerary(
     itinerary = result["itinerary"]
     logger.info(f"[BUILD_ITINERARY] Built itinerary with {len(itinerary.get('days', []))} days")
 
-    # Emit completion progress
-    try:
-        writer = get_stream_writer()
-        writer({"status": f"Itinerary built: {len(itinerary.get('days', []))} days"})
-    except Exception:
-        pass
-
-    # Write itinerary to trip_state and return a ToolMessage for the LLM
-    new_trip_state = dict(trip_state)
-    new_trip_state["itinerary"] = itinerary
+    # Write back ONLY the itinerary key — returning the whole snapshot could
+    # clobber keys another tool set in the same step (merge is right-wins).
+    new_trip_state = {"itinerary": itinerary}
 
     tool_msg = (
         f"Itinerary built successfully!\n"
@@ -189,9 +267,8 @@ async def edit_itinerary(
 
         logger.info(f"[EDIT_ITINERARY] {action_type}: {result['message']}")
 
-        # Write updated itinerary to trip_state
-        new_trip_state = dict(trip_state)
-        new_trip_state["itinerary"] = result["itinerary"]
+        # Write back only the itinerary key — see build_itinerary above.
+        new_trip_state = {"itinerary": result["itinerary"]}
 
         return Command(
             update={

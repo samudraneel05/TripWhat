@@ -769,7 +769,7 @@ function AnchoredFlightRow({ label, legs, flight, onClick }: {
       <span className="text-[10px] text-blue-600 font-medium shrink-0">{label}</span>
       <span className="text-[10px] text-[var(--muted)] shrink-0">{formatDuration(flight.totalDuration)}</span>
       <span className="text-xs font-semibold text-[var(--ink)] ml-auto shrink-0">
-        {flight.currency} {flight.price.toLocaleString()}
+        {flight.price ? `${flight.currency} ${flight.price.toLocaleString()}` : '—'}
       </span>
     </div>
   );

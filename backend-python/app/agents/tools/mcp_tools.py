@@ -11,7 +11,6 @@ from langchain_core.tools import tool
 from app.services.mcp_client import maps_mcp
 from app.services.places_search import places_search
 from app.services.google_places import google_places
-from app.utils.logger import logger
 
 # Contextvar holding a mutable list. chat_stream sets a fresh list before
 # streaming; mcp_search_places appends structured results to it. After the
@@ -35,14 +34,20 @@ def get_search_results() -> list:
 
 
 @tool
-async def mcp_search_places(text_query: str, city: str = "") -> str:
+async def mcp_search_places(text_query: str, city: str = "", exclude: list[str] | None = None) -> str:
     """Search for real places using Google Maps — attractions, restaurants, hotels, etc.
     Use this when the user asks to find things to do, search for hotels/restaurants/attractions,
     or when you need real place data (names, ratings, addresses) for an itinerary.
 
     Args:
         text_query: What to search for (e.g., "attractions", "best sushi restaurants", "hotels near Shinjuku")
-        city: The city to search in (e.g., "Tokyo"). Always pass this when you know the city — it scopes the search.
+        city: The location to search in — a city ("Tokyo"), region ("Tuscany"), or
+              country ("Australia"). Pass whatever the user asked about — it scopes the search.
+        exclude: Place names to leave out of results. When the user asks for
+              MORE/different places after a previous search, pass the names you
+              already showed so the response isn't a repeat of the same list.
+              Prefer a different query angle too (other cities, categories,
+              neighborhoods) rather than re-running a near-identical query.
     """
     # If city is provided and text_query doesn't already mention it, combine them
     # so the actual Google Maps query includes the city (e.g., "attractions in Tokyo").
@@ -53,6 +58,12 @@ async def mcp_search_places(text_query: str, city: str = "") -> str:
 
     # Use cache-first search service (MCP → Google Places → OpenTripMap)
     results = await places_search.search(search_query, city or text_query, limit=10)
+
+    if exclude:
+        excluded = {str(e).strip().lower() for e in exclude}
+        filtered = [r for r in results if (r.get("name") or "").strip().lower() not in excluded]
+        if filtered:
+            results = filtered
 
     # Stash structured results for the search_results widget
     container = _search_results_var.get()

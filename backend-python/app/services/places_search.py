@@ -57,17 +57,35 @@ class PlacesSearchService:
                 logger.info(f"[PLACES_SEARCH] Cache hit for '{query}' → {len(cached)} places")
                 return cached[:limit]
 
-        # Fallback chain: MCP → Google Places API → OpenTripMap
+        # Fallback chain: MCP → Google Places API → OpenTripMap. A provider
+        # that returns a non-empty but sparse result set (e.g. 1 hit for a
+        # country-level query) is supplemented by the next provider — broad
+        # queries like "attractions in Australia" often yield few results
+        # from a single source.
+        min_useful = min(4, limit)
         places = await self._search_mcp(query, city, limit)
-        if not places:
-            places = await self._search_google_places(query, city, limit)
-        if not places:
-            places = await self._search_opentripmap(query, city, limit)
+        if len(places) < min_useful:
+            places = self._merge_places(places, await self._search_google_places(query, city, limit))
+        if len(places) < min_useful:
+            places = self._merge_places(places, await self._search_opentripmap(query, city, limit))
 
         if places:
             await self._cache_results(query, city, places)
 
         return places[:limit]
+
+    @staticmethod
+    def _merge_places(base: list[dict], extra: list[dict]) -> list[dict]:
+        """Merge provider results, deduped by placeId then lowercase name."""
+        seen = {(p.get("placeId") or p.get("id") or p.get("name", "")).lower() if isinstance(p.get("placeId") or p.get("id") or p.get("name", ""), str) else (p.get("placeId") or p.get("id") or "") for p in base}
+        merged = list(base)
+        for p in extra:
+            key = p.get("placeId") or p.get("id") or p.get("name", "")
+            key_l = key.lower() if isinstance(key, str) else key
+            if key_l and key_l not in seen:
+                seen.add(key_l)
+                merged.append(p)
+        return merged
 
     async def search_with_photos(
         self,

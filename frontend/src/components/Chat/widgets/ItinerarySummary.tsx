@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Star, Bookmark, ExternalLink, ChevronLeft, ChevronRight, MapPin } from 'lucide-react';
 import { useSavedStore } from '../../../stores/savedStore';
-import { HighlightedText } from './HighlightedText';
+import { ChatMarkdown } from '../../../lib/chatMarkdown';
 import { imgUrl } from '../../../lib/image';
 
 interface AttractionCard {
@@ -39,12 +39,6 @@ interface ItinerarySummaryProps {
     highlights?: string[];
   };
   onSelectPlace?: (placeId: string) => void;
-}
-
-function formatDate(iso: string | undefined): string {
-  if (!iso) return '';
-  const d = new Date(iso + 'T00:00:00');
-  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
 function HotelCard({ hotel, onSelectPlace }: { hotel: HotelData; onSelectPlace?: (pid: string) => void }) {
@@ -191,7 +185,7 @@ function HotelCard({ hotel, onSelectPlace }: { hotel: HotelData; onSelectPlace?:
 }
 
 export function ItinerarySummary({ data, onSelectPlace }: ItinerarySummaryProps) {
-  const { hotel, attractions, destination, duration, dates, preferences, summary, highlights } = data;
+  const { hotel, attractions, destination, duration, preferences, summary, highlights } = data;
 
   // Top 2 attractions for the photo row
   const featuredAttractions = attractions.slice(0, 2);
@@ -218,7 +212,7 @@ export function ItinerarySummary({ data, onSelectPlace }: ItinerarySummaryProps)
       {hotel && <HotelCard hotel={hotel} onSelectPlace={onSelectPlace} />}
 
       {/* Summary paragraph with highlighted place names */}
-      <HighlightedText text={summaryText} places={attractions} onSelectPlace={onSelectPlace} className="text-xs text-[var(--muted)] leading-relaxed px-1" />
+      <ChatMarkdown text={summaryText} places={attractions} onSelectPlace={onSelectPlace} className="text-xs text-[var(--muted)] leading-relaxed px-1" />
 
       {/* Featured attraction photos — simple image + name below, no overlay */}
       {featuredAttractions.length > 0 && (
@@ -246,7 +240,7 @@ export function ItinerarySummary({ data, onSelectPlace }: ItinerarySummaryProps)
 
       {/* Highlights paragraph with highlighted names */}
       {highlightsText && (
-        <HighlightedText text={highlightsText} places={attractions} onSelectPlace={onSelectPlace} className="text-xs text-[var(--muted)] leading-relaxed px-1" />
+        <ChatMarkdown text={highlightsText} places={attractions} onSelectPlace={onSelectPlace} className="text-xs text-[var(--muted)] leading-relaxed px-1" />
       )}
 
       {/* Refinement hint */}

@@ -30,8 +30,146 @@ function getToolIcon(toolName: string): typeof Search {
   return Wrench;
 }
 
+// Convert a present-tense label to past tense for completed rows.
+// "Searching X" → "Searched X", "Finding X" → "Found X", etc.
+function toPastTense(label: string): string {
+  const conversions: [RegExp, string][] = [
+    [/^Searching (.+)/, 'Searched $1'],
+    [/^Finding (.+)/, 'Found $1'],
+    [/^Computing (.+)/, 'Computed $1'],
+    [/^Checking (.+)/, 'Checked $1'],
+    [/^Planning (.+)/, 'Planned $1'],
+    [/^Building (.+)/, 'Built $1'],
+    [/^Curating (.+)/, 'Curated $1'],
+    [/^Editing (.+)/, 'Edited $1'],
+    [/^Resolving (.+)/, 'Resolved $1'],
+    [/^Saving (.+)/, 'Saved $1'],
+    [/^Adding (.+)/, 'Added $1'],
+    [/^Preparing (.+)/, 'Prepared $1'],
+  ];
+  for (const [re, replacement] of conversions) {
+    if (re.test(label)) return label.replace(re, replacement);
+  }
+  return label;
+}
+
+// Human-readable base label per backend progress group.
+const GROUP_LABELS: Record<string, string> = {
+  place_search: 'Searching places',
+  day_build: 'Curating days',
+  extras: 'Finishing touches',
+};
+
+const GROUP_ICONS: Record<string, typeof Search> = {
+  place_search: Search,
+  day_build: Calendar,
+  extras: Wrench,
+};
+
+// Longest common prefix across labels, trimmed to a word boundary.
+function commonPrefix(members: ToolActivity[]): string {
+  let prefix = members[0]?.label || '';
+  for (const m of members.slice(1)) {
+    let i = 0;
+    while (i < prefix.length && i < m.label.length && prefix[i] === m.label[i]) i++;
+    prefix = prefix.slice(0, i);
+  }
+  const lastSpace = prefix.lastIndexOf(' ');
+  if (lastSpace > 0) prefix = prefix.slice(0, lastSpace);
+  return prefix.replace(/[\s—:·-]+$/, '');
+}
+
+// Label for a collapsed group row, e.g. "Searching places in Tokyo".
+// Appends the shared city when every member label ends with "in <city>".
+function groupLabel(group: string, members: ToolActivity[]): string {
+  const base = GROUP_LABELS[group] || commonPrefix(members) || members[0]?.label || 'Working';
+  const cities = members.map(
+    (m) => m.label.match(/ in ([^—·]+?)(?:\s*—.*)?$/)?.[1]
+  );
+  if (cities.length > 0 && cities.every((c) => c && c === cities[0])) {
+    return `${base} in ${cities[0]}`;
+  }
+  return base;
+}
+
+type DisplayItem =
+  | { kind: 'single'; act: ToolActivity }
+  | { kind: 'group'; group: string; members: ToolActivity[] };
+
+// Collapse activities sharing a `group` (≥2 members) into one item,
+// rendered at the position of the group's first member.
+function groupActivities(activities: ToolActivity[]): DisplayItem[] {
+  const byGroup = new Map<string, ToolActivity[]>();
+  for (const a of activities) {
+    if (!a.group) continue;
+    const list = byGroup.get(a.group);
+    if (list) list.push(a);
+    else byGroup.set(a.group, [a]);
+  }
+  const items: DisplayItem[] = [];
+  const seen = new Set<string>();
+  for (const a of activities) {
+    const members = a.group ? byGroup.get(a.group) : undefined;
+    if (!members || members.length < 2) {
+      items.push({ kind: 'single', act: a });
+      continue;
+    }
+    if (seen.has(a.group!)) continue;
+    seen.add(a.group!);
+    items.push({ kind: 'group', group: a.group!, members });
+  }
+  return items;
+}
+
 export function ToolActivityBar({ activities, isLoading }: ToolActivityBarProps) {
   const [expanded, setExpanded] = useState(false);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
+
+  const toggleGroup = (group: string) => {
+    setExpandedGroups((prev) => {
+      const next = new Set(prev);
+      if (next.has(group)) next.delete(group);
+      else next.add(group);
+      return next;
+    });
+  };
+
+  const renderActivityRow = (act: ToolActivity, showSummary: boolean) => {
+    const Icon = getToolIcon(act.toolName);
+    return (
+      <div
+        key={act.callId}
+        className="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--sage)]/50 transition-colors"
+      >
+        <Icon className="w-3 h-3 text-[var(--muted)] shrink-0" />
+        {showSummary ? (
+          <div className="flex-1 min-w-0">
+            <span className="text-[11px] text-[var(--ink)] truncate block">
+              {act.label}
+            </span>
+            {act.summary && (
+              <span className="text-[10px] text-[var(--muted)] truncate block">
+                {act.summary}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-[11px] text-[var(--ink)] flex-1 truncate">
+            {act.label}
+          </span>
+        )}
+        {act.status === 'running' && (
+          <Loader2 className="w-3 h-3 text-[var(--peach)] animate-spin shrink-0" />
+        )}
+        {act.status === 'finished' && (
+          <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
+        )}
+        {act.status === 'error' && (
+          <AlertCircle className="w-3 h-3 text-red-500 shrink-0" />
+        )}
+      </div>
+    );
+  };
 
   if (!activities || activities.length === 0) return null;
 
@@ -67,28 +205,49 @@ export function ToolActivityBar({ activities, isLoading }: ToolActivityBarProps)
             </div>
           </div>
 
-          {/* Activity list — show when multiple tools or when expanded */}
+          {/* Activity list — grouped when ≥2 running tasks share a group */}
           {activities.length > 1 && (
             <div className="border-t border-[var(--border)]">
-              {activities.map((act) => {
-                const Icon = getToolIcon(act.toolName);
+              {groupActivities(activities).map((item) => {
+                if (item.kind === 'single') {
+                  return renderActivityRow(item.act, false);
+                }
+                const groupRunning = item.members.filter((m) => m.status === 'running');
+                const groupErrors = item.members.filter((m) => m.status === 'error');
+                const isOpen = expandedGroups.has(item.group) || groupErrors.length > 0;
+                const GroupIcon = GROUP_ICONS[item.group] || getToolIcon(item.members[0]?.toolName || '');
+                const label = groupLabel(item.group, item.members);
                 return (
-                  <div
-                    key={act.callId}
-                    className="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--sage)]/50 transition-colors"
-                  >
-                    <Icon className="w-3 h-3 text-[var(--muted)] shrink-0" />
-                    <span className="text-[11px] text-[var(--ink)] flex-1 truncate">
-                      {act.label}
-                    </span>
-                    {act.status === 'running' && (
-                      <Loader2 className="w-3 h-3 text-[var(--peach)] animate-spin shrink-0" />
-                    )}
-                    {act.status === 'finished' && (
-                      <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
-                    )}
-                    {act.status === 'error' && (
-                      <AlertCircle className="w-3 h-3 text-red-500 shrink-0" />
+                  <div key={`group-${item.group}`}>
+                    <button
+                      onClick={() => toggleGroup(item.group)}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--sage)]/50 transition-colors text-left"
+                    >
+                      <GroupIcon className="w-3 h-3 text-[var(--muted)] shrink-0" />
+                      <span className="text-[11px] text-[var(--ink)] flex-1 truncate">
+                        {groupRunning.length > 0
+                          ? `${label} · ${groupRunning.length} parallel`
+                          : `${toPastTense(label)} · ${item.members.length}`}
+                      </span>
+                      {groupRunning.length > 0 && (
+                        <Loader2 className="w-3 h-3 text-[var(--peach)] animate-spin shrink-0" />
+                      )}
+                      {groupRunning.length === 0 && groupErrors.length > 0 && (
+                        <AlertCircle className="w-3 h-3 text-red-500 shrink-0" />
+                      )}
+                      {groupRunning.length === 0 && groupErrors.length === 0 && (
+                        <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
+                      )}
+                      {isOpen ? (
+                        <ChevronDown className="w-3 h-3 text-[var(--muted)] shrink-0" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3 text-[var(--muted)] shrink-0" />
+                      )}
+                    </button>
+                    {isOpen && (
+                      <div className="border-t border-[var(--border)]">
+                        {item.members.map((act) => renderActivityRow(act, false))}
+                      </div>
                     )}
                   </div>
                 );
@@ -102,38 +261,6 @@ export function ToolActivityBar({ activities, isLoading }: ToolActivityBarProps)
 
   // After loading: collapsed bar that expands to show all results
   const totalFound = finished.length;
-
-  // Convert a present-tense label to past tense for the collapsed view
-  function toPastTense(label: string): string {
-    // "Searching X" → "Searched X"
-    // "Finding X" → "Found X"
-    // "Computing X" → "Computed X"
-    // "Checking X" → "Checked X"
-    // "Planning X" → "Planned X"
-    // "Building X" → "Built X"
-    // "Editing X" → "Edited X"
-    // "Resolving X" → "Resolved X"
-    // "Saving X" → "Saved X"
-    // "Adding X" → "Added X"
-    // "Preparing X" → "Prepared X"
-    const conversions: [RegExp, string][] = [
-      [/^Searching (.+)/, 'Searched $1'],
-      [/^Finding (.+)/, 'Found $1'],
-      [/^Computing (.+)/, 'Computed $1'],
-      [/^Checking (.+)/, 'Checked $1'],
-      [/^Planning (.+)/, 'Planned $1'],
-      [/^Building (.+)/, 'Built $1'],
-      [/^Editing (.+)/, 'Edited $1'],
-      [/^Resolving (.+)/, 'Resolved $1'],
-      [/^Saving (.+)/, 'Saved $1'],
-      [/^Adding (.+)/, 'Added $1'],
-      [/^Preparing (.+)/, 'Prepared $1'],
-    ];
-    for (const [re, replacement] of conversions) {
-      if (re.test(label)) return label.replace(re, replacement);
-    }
-    return label;
-  }
 
   // Build a nice past-tense header from the finished activities
   function buildHeader(): string {
@@ -193,29 +320,39 @@ export function ToolActivityBar({ activities, isLoading }: ToolActivityBarProps)
 
       {expanded && (
         <div className="mt-0.5 rounded-lg border border-[var(--border)] bg-[var(--bg)] overflow-hidden">
-          {activities.map((act) => {
-            const Icon = getToolIcon(act.toolName);
+          {groupActivities(activities).map((item) => {
+            if (item.kind === 'single') {
+              return renderActivityRow(item.act, true);
+            }
+            const groupErrors = item.members.filter((m) => m.status === 'error');
+            const isOpen = expandedGroups.has(item.group) || groupErrors.length > 0;
+            const GroupIcon = GROUP_ICONS[item.group] || getToolIcon(item.members[0]?.toolName || '');
+            const label = toPastTense(groupLabel(item.group, item.members));
             return (
-              <div
-                key={act.callId}
-                className="flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--sage)]/50 transition-colors"
-              >
-                <Icon className="w-3 h-3 text-[var(--muted)] shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <span className="text-[11px] text-[var(--ink)] truncate block">
-                    {act.label}
+              <div key={`group-${item.group}`}>
+                <button
+                  onClick={() => toggleGroup(item.group)}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-[var(--sage)]/50 transition-colors text-left"
+                >
+                  <GroupIcon className="w-3 h-3 text-[var(--muted)] shrink-0" />
+                  <span className="text-[11px] text-[var(--ink)] flex-1 truncate">
+                    {label} · {item.members.length}
                   </span>
-                  {act.summary && (
-                    <span className="text-[10px] text-[var(--muted)] truncate block">
-                      {act.summary}
-                    </span>
+                  {groupErrors.length > 0 ? (
+                    <AlertCircle className="w-3 h-3 text-red-500 shrink-0" />
+                  ) : (
+                    <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
                   )}
-                </div>
-                {act.status === 'finished' && (
-                  <CheckCircle2 className="w-3 h-3 text-green-600 shrink-0" />
-                )}
-                {act.status === 'error' && (
-                  <AlertCircle className="w-3 h-3 text-red-500 shrink-0" />
+                  {isOpen ? (
+                    <ChevronDown className="w-3 h-3 text-[var(--muted)] shrink-0" />
+                  ) : (
+                    <ChevronRight className="w-3 h-3 text-[var(--muted)] shrink-0" />
+                  )}
+                </button>
+                {isOpen && (
+                  <div className="border-t border-[var(--border)]">
+                    {item.members.map((act) => renderActivityRow(act, true))}
+                  </div>
                 )}
               </div>
             );

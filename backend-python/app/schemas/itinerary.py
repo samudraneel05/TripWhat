@@ -147,7 +147,7 @@ class FlightOption(BaseModel):
     returnLegs: list[FlightLeg] = []
     layovers: list[dict] = []
     totalDuration: int = 0
-    price: float = 0
+    price: float | None = None
     currency: str = "USD"
     type: str = ""
     isBest: bool = False

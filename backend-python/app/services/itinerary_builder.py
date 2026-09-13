@@ -8,9 +8,10 @@ Uses a search → curate → enrich pipeline:
 """
 
 import asyncio
-import json
+import os
 import re
 from datetime import datetime, timedelta
+from functools import partial
 from typing import Any
 
 from langchain_openai import ChatOpenAI
@@ -22,8 +23,74 @@ from app.schemas.itinerary import (
 )
 from app.services.places_search import places_search
 from app.services.distance_matrix import distance_matrix
-from app.services.query_generator import generate_queries, generate_hotel_queries, generate_restaurant_queries, generate_personalized_queries
+from app.services.llm_json import parse_json_robust
+from app.services.query_generator import generate_queries, generate_hotel_queries, generate_restaurant_queries, generate_personalized_queries, generate_llm_queries
 from app.utils.logger import logger
+
+
+def _slugify(text: str) -> str:
+    """Stable slug for progress-event task_ids (e.g. 'New York' → 'new_york')."""
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_") or "task"
+
+
+def _max_concurrency() -> int:
+    """Max concurrent outbound calls/units — env ITINERARY_MAX_CONCURRENCY, default 5."""
+    try:
+        return max(1, int(os.getenv("ITINERARY_MAX_CONCURRENCY", "5")))
+    except (TypeError, ValueError):
+        return 5
+
+
+ITINERARY_MAX_CONCURRENCY = _max_concurrency()
+
+# Bounds concurrent outbound calls (LLM ainvoke, places searches,
+# distance-matrix batches, photo resolution, SerpApi calls).
+_API_SEMAPHORE = asyncio.Semaphore(ITINERARY_MAX_CONCURRENCY)
+
+# Bounds concurrent units of work (per-day pipelines, per-city searches).
+_UNIT_SEMAPHORE = asyncio.Semaphore(ITINERARY_MAX_CONCURRENCY)
+
+
+async def _with_api_sem(call):
+    """Run a zero-arg awaitable factory under the global outbound-call limit.
+
+    Takes a callable (e.g. functools.partial) rather than a coroutine so the
+    inner coroutine is only created once a semaphore permit is held.
+    """
+    async with _API_SEMAPHORE:
+        return await call()
+
+
+async def _bounded_gather(aws, return_exceptions: bool = False):
+    """asyncio.gather where each awaitable runs under _UNIT_SEMAPHORE.
+
+    Results are returned in the order of `aws`, not completion order.
+    """
+    async def _run(aw):
+        async with _UNIT_SEMAPHORE:
+            return await aw
+    return await asyncio.gather(
+        *(_run(aw) for aw in aws), return_exceptions=return_exceptions
+    )
+
+
+async def _emit(status_cb, event: dict) -> None:
+    """Emit a structured progress event; no-op when status_cb is None or raises."""
+    if not status_cb:
+        return
+    try:
+        await status_cb(event)
+    except Exception as e:
+        logger.warning(f"[ITINERARY_BUILDER] status_cb emit failed: {e}")
+
+
+async def _tracked(status_cb, event_base: dict, aw):
+    """Emit state:start before awaiting `aw` and state:end after it finishes."""
+    await _emit(status_cb, {**event_base, "state": "start"})
+    try:
+        return await aw
+    finally:
+        await _emit(status_cb, {**event_base, "state": "end"})
 
 
 def _extract_content(response) -> str:
@@ -46,87 +113,6 @@ def _extract_content(response) -> str:
                 parts.append(block)
         return "".join(parts)
     return str(content)
-
-
-def _repair_json(text: str) -> str:
-    """Attempt to fix common LLM JSON mistakes.
-
-    Handles:
-    - Markdown code fences (```json ... ```)
-    - Single-quoted strings → double-quoted
-    - Unquoted property names → quoted
-    - Trailing commas before } or ]
-    - Smart quotes → straight quotes
-    - Missing commas between items
-    """
-    # Strip markdown code fences
-    text = re.sub(r"^```(?:json)?\s*", "", text.strip())
-    text = re.sub(r"\s*```\s*$", "", text)
-
-    # Replace smart quotes with straight quotes
-    text = text.replace("\u201c", '"').replace("\u201d", '"')
-    text = text.replace("\u2018", "'").replace("\u2019", "'")
-
-    # Replace single-quoted strings with double-quoted ones.
-    # Match '...' that appear in JSON delimiter positions:
-    # After [, {, :, ,  or  before ], }, :, ,
-    text = re.sub(r"([\[{,:])\s*'([^']*)'", r'\1 "\2"', text)
-    text = re.sub(r"'([^']*)'\s*([,\]}:])", r'"\1" \2', text)
-    # Handle single-quoted strings at the very start/end
-    text = re.sub(r"^\s*'([^']*)'", r'"\1"', text)
-    text = re.sub(r"'([^']*)'\s*$", r'"\1"', text)
-
-    # Quote unquoted property names: {name: ... → {"name": ...
-    text = re.sub(r'([{,]\s*)([a-zA-Z_]\w*)\s*:', r'\1"\2":', text)
-
-    # Remove trailing commas before } or ]
-    text = re.sub(r",\s*([}\]])", r"\1", text)
-
-    # Fix missing commas between items: }" → },"  ]" → ],"  }{ → },{  ]{ → ],{
-    text = re.sub(r'(["\d\w\]\}])\s*(\{["\[])', r'\1,\2', text)
-    # Fix missing comma between number/bool/null and a quoted property name: 4 "order" → 4, "order"
-    text = re.sub(r'(\b\d+|true|false|null)\s+(")', r'\1, \2', text)
-    # Fix missing comma between adjacent strings: "value" "key" → "value", "key"
-    # (safe because in valid JSON, "": "" has a colon between the quotes)
-    text = re.sub(r'"\s+"', '", "', text)
-
-    return text
-
-
-def _parse_json_robust(text: str) -> Any | None:
-    """Parse JSON from LLM output with multiple repair attempts.
-
-    Tries direct parse, then regex extraction, then repair.
-    Returns None if all attempts fail.
-    """
-    # Attempt 1: direct parse
-    try:
-        return json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # Attempt 2: extract JSON array or object via regex, then parse
-    for pattern in [r"\[[\s\S]*\]", r"\{[\s\S]*\}"]:
-        match = re.search(pattern, text)
-        if match:
-            raw = match.group()
-            try:
-                return json.loads(raw)
-            except json.JSONDecodeError:
-                # Attempt 3: repair and retry
-                repaired = _repair_json(raw)
-                try:
-                    return json.loads(repaired)
-                except json.JSONDecodeError:
-                    # Attempt 4: extract again after repair
-                    match2 = re.search(pattern, repaired)
-                    if match2:
-                        try:
-                            return json.loads(match2.group())
-                        except json.JSONDecodeError:
-                            pass
-
-    return None
 
 
 TIME_BUDGETS = {
@@ -173,15 +159,18 @@ class ItineraryBuilder:
 
     async def build(self, ctx: dict, status_cb=None) -> dict | None:
         cities = ctx.get("cities")
-        if status_cb:
-            await status_cb({"phase": "build_start", "cities": [c.get("name") for c in (cities or [])]})
+        await _emit(status_cb, {
+            "phase": "build_start", "state": "start", "group": "extras",
+            "cities": [c.get("name") for c in (cities or [])],
+        })
         if cities and len(cities) > 0:
             if ctx.get("include_travel_means"):
-                return await self._build_with_travel_means(ctx, status_cb)
-            return await self._build_multi_city(ctx, status_cb)
-        result = await self._build_single_city(ctx, status_cb)
-        if status_cb:
-            await status_cb({"phase": "build_complete"})
+                result = await self._build_with_travel_means(ctx, status_cb)
+            else:
+                result = await self._build_multi_city(ctx, status_cb)
+        else:
+            result = await self._build_single_city(ctx, status_cb)
+        await _emit(status_cb, {"phase": "build_complete", "state": "end", "group": "extras"})
         return result
 
     async def _search_all_places_for_city(
@@ -193,12 +182,19 @@ class ItineraryBuilder:
         user_memories: list[dict] | None = None,
         traveler_type: str | None = None,
         user_interests: list[str] | None = None,
+        preferences: list[str] | None = None,
+        dates: dict | str | None = None,
+        status_cb=None,
     ) -> list[dict]:
         """Search for all real places in a city (across all days).
 
         Generates queries for the full trip and searches once, returning
         a deduplicated pool of places. This pool is then clustered by
         geographic proximity so each day gets nearby places.
+
+        Queries are hybrid: the zero-token procedural templates plus one
+        cached LLM call (generate_llm_queries) for destination-specific
+        coverage — seasonality, signature experiences, neighborhoods.
         """
         # Generate a broad set of queries covering the whole trip
         if user_memories or traveler_type or user_interests:
@@ -211,18 +207,29 @@ class ItineraryBuilder:
         else:
             queries = generate_queries(city, trip_style, help_with, 1, total_days)
 
-        # Add extra queries for variety across days
-        extra_queries = [
-            f"hidden gems in {city}",
-            f"local favorites in {city}",
-            f"off the beaten path in {city}",
-            f"best views in {city}",
-            f"historic sites in {city}",
-        ]
-        queries = list(dict.fromkeys(queries + extra_queries))  # dedup preserving order
+        # Hybrid: LLM-generated destination-specific queries alongside the
+        # procedural base (cached per city+style+month; returns [] on failure).
+        llm_queries = await generate_llm_queries(
+            city,
+            trip_style=trip_style,
+            preferences=preferences,
+            dates=dates,
+            traveler_type=traveler_type,
+        )
+        queries = list(dict.fromkeys(queries + llm_queries))  # dedup preserving order
 
         logger.info(f"[ITINERARY_BUILDER] Searching {len(queries)} queries for {city}: {queries}")
-        places = await places_search.search_multiple(queries, city, limit_per_query=10)
+        places = await _tracked(
+            status_cb,
+            {
+                "phase": "search_places",
+                "task_id": f"search_{_slugify(city)}",
+                "city": city,
+                "group": "place_search",
+                "detail": f"{len(queries)} queries",
+            },
+            _with_api_sem(partial(places_search.search_multiple, queries, city, limit_per_query=10)),
+        )
 
         # Deduplicate by placeId
         seen_ids = set()
@@ -255,13 +262,15 @@ class ItineraryBuilder:
         traveler_type: str | None = None,
         user_interests: list[str] | None = None,
         day_places: list[dict] | None = None,
+        preferences: list[str] | None = None,
+        dates: dict | str | None = None,
     ) -> list[dict]:
         """Search for real places and use LLM to curate activities for the day.
 
         If day_places is provided (a pre-clustered subset), uses those directly.
         Otherwise, searches and uses all results (legacy behavior).
 
-        1. Generate procedural queries (zero LLM tokens)
+        1. Generate procedural queries (zero LLM tokens) + cached LLM queries
         2. Search via places_search (cache-first, with photo resolution)
         3. LLM picks 2-5 activities from real results based on time budget
         """
@@ -282,10 +291,21 @@ class ItineraryBuilder:
                 )
             else:
                 queries = generate_queries(city, trip_style, help_with, day_num, total_days)
+
+            # Hybrid: cached destination-specific LLM queries, same as
+            # _search_all_places_for_city (cache hit when that already ran).
+            llm_queries = await generate_llm_queries(
+                city,
+                trip_style=trip_style,
+                preferences=preferences,
+                dates=dates,
+                traveler_type=traveler_type,
+            )
+            queries = list(dict.fromkeys(queries + llm_queries))  # dedup preserving order
             logger.info(f"[ITINERARY_BUILDER] Generated {len(queries)} queries for {city} day {day_num}: {queries}")
 
             # Step 2: Search for real places (cache-first, with photos)
-            places = await places_search.search_multiple(queries, city, limit_per_query=10)
+            places = await _with_api_sem(partial(places_search.search_multiple, queries, city, limit_per_query=10))
 
             if not places:
                 logger.warning(f"[ITINERARY_BUILDER] No places found for {city}, using LLM fallback")
@@ -498,12 +518,13 @@ Respond with ONLY a JSON array of 2-5 objects:
 """
 
         try:
-            response = await self.model.ainvoke([
-                {"role": "system", "content": "You are a knowledgeable travel planner. Always respond with valid JSON only."},
-                {"role": "user", "content": prompt},
-            ])
+            async with _API_SEMAPHORE:
+                response = await self.model.ainvoke([
+                    {"role": "system", "content": "You are a knowledgeable travel planner. Always respond with valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ])
             content = _extract_content(response)
-            curated = _parse_json_robust(content)
+            curated = parse_json_robust(content)
             if curated and isinstance(curated, list) and len(curated) >= 2:
                 # Enrich curated activities with real place data
                 enriched = await self._enrich_activities(curated, places)
@@ -553,7 +574,7 @@ Respond with ONLY a JSON array of 2-5 objects:
                 # Resolve photo URL if it's a reference, not a direct URL
                 photo_url = matching.get("photo_url", "")
                 if photo_url and not photo_url.startswith("http"):
-                    photo_tasks.append((c, google_places.resolve_photo_url(photo_url)))
+                    photo_tasks.append((c, _with_api_sem(partial(google_places.resolve_photo_url, photo_url))))
                 else:
                     c["photo_url"] = photo_url or None
 
@@ -589,10 +610,8 @@ Respond with ONLY a JSON array of 2-5 objects:
             return activities
 
         def get_coords(a: dict) -> tuple[float, float]:
-            c = a.get("coordinates", {})
-            if c and c.get("lat") and c.get("lng"):
-                return c["lat"], c["lng"]
-            return 0.0, 0.0
+            c = distance_matrix._get_coords(a)
+            return (c["lat"], c["lng"]) if c else (0.0, 0.0)
 
         result = [activities[0]]
         remaining = list(activities[1:])
@@ -672,7 +691,7 @@ Respond with ONLY a JSON array of 2-5 objects:
 
             valid_pairs = [p for p in pairs if p is not None]
             if valid_pairs:
-                valid_results = await distance_matrix.compute_travel_times(valid_pairs, mode=mode)
+                valid_results = await _with_api_sem(partial(distance_matrix.compute_travel_times, valid_pairs, mode=mode))
                 vi = 0
                 for j, i in enumerate(indices):
                     if pairs[j] is not None and vi < len(valid_results):
@@ -761,20 +780,12 @@ Respond with ONLY a JSON array of 2-5 objects:
         if index >= len(all_activities) - 1:
             return  # last activity, no next
 
-        def get_coords(a: dict) -> tuple[float, float] | None:
-            c = a.get("coordinates") or {}
-            lat = c.get("lat")
-            lng = c.get("lng")
-            if lat is not None and lng is not None and lat != 0 and lng != 0:
-                return lat, lng
-            return None
-
-        origin = get_coords(activity)
-        dest = get_coords(all_activities[index + 1])
+        origin = distance_matrix._get_coords(activity)
+        dest = distance_matrix._get_coords(all_activities[index + 1])
         if not origin or not dest:
             return
 
-        km = self._haversine_km(origin[0], origin[1], dest[0], dest[1])
+        km = self._haversine_km(origin["lat"], origin["lng"], dest["lat"], dest["lng"])
         if mode == "flight":
             speed_kmh = 800.0
             seconds = int((km / speed_kmh) * 3600) + 2 * 3600  # +2h overhead
@@ -918,6 +929,59 @@ Respond with ONLY a JSON array of 2-5 objects:
         defaults = {"morning": "12:00", "afternoon": "18:00", "evening": "22:00"}
         return defaults.get(period, "18:00")
 
+    def _reconcile_used_names(
+        self,
+        activities: list[dict],
+        day_places: list[dict] | None,
+        used_names: set[str],
+    ) -> list[dict]:
+        """Post-hoc dedup for days curated in parallel.
+
+        Parallel day builds can't see each other's picks, so the same place
+        may be selected on two days. Walk the day's activities; for any name
+        already claimed by an earlier day, swap in the highest-rated unused
+        place from this day's cluster. Names this day uses are recorded in
+        `used_names` (call once per day, in day order).
+        """
+        if not activities:
+            return activities
+        picked = {a.get("name", "").lower() for a in activities if a.get("name")}
+        candidates = sorted(
+            (
+                p for p in (day_places or [])
+                if p.get("name")
+                and p["name"].lower() not in used_names
+                and p["name"].lower() not in picked
+            ),
+            key=lambda p: p.get("rating") or 0,
+            reverse=True,
+        )
+        for i, act in enumerate(activities):
+            name = act.get("name", "")
+            if not name:
+                continue
+            if name.lower() not in used_names:
+                used_names.add(name.lower())
+                continue
+            # Duplicate of an earlier day's pick — try to swap it out
+            if not candidates:
+                continue  # no replacement available; keep the pick
+            p = candidates.pop(0)
+            activities[i] = {
+                "period": act.get("period", "morning"),
+                "name": p.get("name", name),
+                "type": ", ".join(p.get("types", [])[:2]) if p.get("types") else act.get("type", "attraction"),
+                "description": p.get("description", "")[:100] or act.get("description", ""),
+                "duration": act.get("duration", "2-3 hours"),
+                "placeId": p.get("placeId", ""),
+                "coordinates": p.get("coordinates", {}),
+                "rating": p.get("rating"),
+                "address": p.get("address", ""),
+                "photo_url": p.get("photo_url", ""),
+            }
+            used_names.add(activities[i]["name"].lower())
+        return activities
+
     async def _build_single_city(self, ctx: dict, status_cb=None) -> dict:
         destination = ctx["destination"]
         duration = ctx["duration"]
@@ -942,24 +1006,72 @@ Respond with ONLY a JSON array of 2-5 objects:
         all_places = await self._search_all_places_for_city(
             destination, trip_style, help_with, duration,
             user_memories=user_memories, traveler_type=traveler_type, user_interests=user_interests,
+            preferences=ctx.get("preferences"), dates=ctx.get("startDate"),
+            status_cb=status_cb,
         )
         clusters = self._cluster_places_by_proximity(all_places, duration) if all_places else []
 
-        used_names: list[str] = []
+        city_slug = _slugify(destination)
+        num_days = len(itinerary.days)
         for i, day in enumerate(itinerary.days):
             day.subtitle = self._generate_day_description(destination, i + 1, duration, trip_style)
+
+        # Phase 1: curate all days concurrently (bounded). gather returns
+        # results in day-index order regardless of completion order.
+        async def _curate_day(i: int) -> list[dict]:
+            day_num = i + 1
             day_cluster = clusters[i] if i < len(clusters) else None
-            activities = await self._search_and_curate_activities(
-                destination, i + 1, duration, trip_style, help_with, [destination], used_names,
-                user_memories=user_memories, traveler_type=traveler_type, user_interests=user_interests,
-                day_places=day_cluster,
+            return await _tracked(
+                status_cb,
+                {
+                    "phase": "curate_day",
+                    "task_id": f"curate_{city_slug}_{day_num}",
+                    "city": destination,
+                    "day": day_num,
+                    "group": "day_build",
+                    "detail": f"{len(day_cluster or [])} places",
+                },
+                self._search_and_curate_activities(
+                    destination, day_num, duration, trip_style, help_with,
+                    [destination], None,
+                    user_memories=user_memories, traveler_type=traveler_type,
+                    user_interests=user_interests, day_places=day_cluster,
+                    preferences=ctx.get("preferences"), dates=ctx.get("startDate"),
+                ),
             )
-            for a in activities:
-                name = a.get("name", "")
-                if name:
-                    used_names.append(name)
-            # Compute travel times between consecutive activities
-            activities = await self._compute_inter_activity_travel(activities, travel_mode)
+
+        curated_results = await _bounded_gather(
+            [_curate_day(i) for i in range(num_days)], return_exceptions=True
+        )
+
+        # Reconcile duplicate picks across days post-hoc, in day order.
+        used_names: set[str] = set()
+        day_activities: list[list[dict]] = []
+        for i in range(num_days):
+            res = curated_results[i]
+            if isinstance(res, Exception):
+                logger.error(f"[ITINERARY_BUILDER] Day {i + 1} curation failed: {res}")
+                acts = self._llm_fallback_activities(destination, i + 1, duration, trip_style)
+            else:
+                acts = res
+            day_cluster = clusters[i] if i < len(clusters) else None
+            day_activities.append(self._reconcile_used_names(acts, day_cluster, used_names))
+
+        # Phase 2: travel times + time-slot assembly per day, concurrently.
+        async def _build_day_slots(i: int) -> None:
+            day_num = i + 1
+            day = itinerary.days[i]
+            activities = await _tracked(
+                status_cb,
+                {
+                    "phase": "travel_times",
+                    "task_id": f"travel_{city_slug}_{day_num}",
+                    "city": destination,
+                    "day": day_num,
+                    "group": "day_build",
+                },
+                self._compute_inter_activity_travel(day_activities[i], travel_mode),
+            )
             # Chain time slots: each activity starts after the previous ends + travel time
             time_slots = []
             prev_end = "09:00"
@@ -970,26 +1082,41 @@ Respond with ONLY a JSON array of 2-5 objects:
                 prev_end = slot.endTime
                 time_slots.append(slot)
             day.timeSlots = time_slots
-            if status_cb:
-                await status_cb({
-                    "phase": "day_complete",
-                    "day": day.dayNumber,
-                    "city": destination,
-                    "timeSlots": [ts.model_dump() for ts in time_slots],
-                    "totalDays": duration,
-                })
+            await _emit(status_cb, {
+                "phase": "day_complete",
+                "state": "end",
+                "task_id": f"curate_{city_slug}_{day_num}",
+                "day": day.dayNumber,
+                "city": destination,
+                "group": "day_build",
+                "timeSlots": [ts.model_dump() for ts in time_slots],
+                "totalDays": duration,
+            })
 
-        # Fetch hotel and restaurant recommendations for the city
-        if status_cb:
-            await status_cb({"phase": "hotels_restaurants", "city": destination})
-        hotels, restaurants = await self._search_hotels_and_restaurants(destination, ctx)
+        slot_results = await _bounded_gather(
+            [_build_day_slots(i) for i in range(num_days)], return_exceptions=True
+        )
+        for i, res in enumerate(slot_results):
+            if isinstance(res, Exception):
+                logger.error(f"[ITINERARY_BUILDER] Day {i + 1} slot build failed: {res}")
+
+        # Fetch hotel/restaurant recommendations and flights concurrently
+        (hotels, restaurants), flights = await asyncio.gather(
+            _tracked(
+                status_cb,
+                {"phase": "hotels_restaurants", "task_id": f"hotels_{city_slug}",
+                 "city": destination, "group": "extras"},
+                self._search_hotels_and_restaurants(destination, ctx),
+            ),
+            _tracked(
+                status_cb,
+                {"phase": "flights", "task_id": f"flights_{city_slug}",
+                 "city": destination, "group": "extras"},
+                self._search_flights_for_trip(ctx),
+            ),
+        )
         itinerary.hotelRecommendations = hotels
         itinerary.restaurantRecommendations = restaurants
-
-        # Search flights if start location and dates are available
-        if status_cb:
-            await status_cb({"phase": "flights", "city": destination})
-        flights = await self._search_flights_for_trip(ctx)
         itinerary.flightOptions = flights
 
         return {"itinerary": itinerary.model_dump()}
@@ -1010,72 +1137,157 @@ Respond with ONLY a JSON array of 2-5 objects:
 
         itinerary = create_itinerary(cities[0]["name"], total_days, start_date)
 
+        # Phase 0: search + cluster all cities concurrently (bounded)
+        async def _search_city(city: dict) -> list[list[dict]]:
+            all_places = await self._search_all_places_for_city(
+                city["name"], trip_style, help_with, total_days,
+                user_memories=user_memories, traveler_type=traveler_type, user_interests=user_interests,
+                preferences=ctx.get("preferences"), dates=ctx.get("startDate"),
+                status_cb=status_cb,
+            )
+            return self._cluster_places_by_proximity(all_places, city["days"]) if all_places else []
+
+        cluster_results = await _bounded_gather(
+            [_search_city(c) for c in cities], return_exceptions=True
+        )
+        city_clusters: list[list[list[dict]]] = []
+        for c, res in zip(cities, cluster_results):
+            if isinstance(res, Exception):
+                logger.error(f"[ITINERARY_BUILDER] Place search failed for {c['name']}: {res}")
+                city_clusters.append([])
+            else:
+                city_clusters.append(res)
+
+        # Assign day metadata and build the flat spec list (global_idx, city_idx, local_day)
+        day_specs: list[tuple[int, int, int]] = []
         day_idx = 0
-        used_names: list[str] = []
-        current_city = None
-        city_clusters: list[list[dict]] = []
-        for city in cities:
-            if city["name"] != current_city:
-                used_names = []
-                current_city = city["name"]
-                # Search all places for this city once, then cluster
-                all_places = await self._search_all_places_for_city(
-                    city["name"], trip_style, help_with, total_days,
-                    user_memories=user_memories, traveler_type=traveler_type, user_interests=user_interests,
-                )
-                city_clusters = self._cluster_places_by_proximity(all_places, city["days"]) if all_places else []
-            city_days = city["days"]
-            for d in range(city_days):
+        for ci, city in enumerate(cities):
+            for d in range(city["days"]):
                 if day_idx < len(itinerary.days):
                     day = itinerary.days[day_idx]
                     day.location = city["name"]
                     day.title = f"Day {day_idx + 1} - {city['name']}"
                     day.subtitle = self._generate_day_description(city["name"], day_idx + 1, total_days, trip_style)
-                    day_cluster = city_clusters[d] if d < len(city_clusters) else None
-                    activities = await self._search_and_curate_activities(
-                        city["name"], day_idx + 1, total_days, trip_style, help_with, all_city_names, used_names,
-                        user_memories=user_memories, traveler_type=traveler_type, user_interests=user_interests,
-                        day_places=day_cluster,
-                    )
-                    for a in activities:
-                        name = a.get("name", "")
-                        if name:
-                            used_names.append(name)
-                    # Compute travel times between consecutive activities
-                    activities = await self._compute_inter_activity_travel(activities, travel_mode)
-                    # Chain time slots: each activity starts after the previous ends + travel time
-                    time_slots = []
-                    prev_end = "09:00"
-                    for a in activities:
-                        travel_info = a.get("travelInfo") or {}
-                        travel_sec = travel_info.get("durationSeconds", 0)
-                        slot = self._activity_to_time_slot(a, prev_end, travel_seconds=travel_sec)
-                        prev_end = slot.endTime
-                        time_slots.append(slot)
-                    day.timeSlots = time_slots
-                    if status_cb:
-                        await status_cb({
-                            "phase": "day_complete",
-                            "day": day.dayNumber,
-                            "city": city["name"],
-                            "timeSlots": [ts.model_dump() for ts in time_slots],
-                            "totalDays": total_days,
-                        })
+                    day_specs.append((day_idx, ci, d))
                 day_idx += 1
+
+        # Phase 1: curate every day of every city concurrently (bounded).
+        # gather returns results aligned to day_specs order.
+        async def _curate_day(gidx: int, ci: int, d: int) -> list[dict]:
+            city = cities[ci]
+            day_num = gidx + 1
+            clusters = city_clusters[ci]
+            day_cluster = clusters[d] if d < len(clusters) else None
+            return await _tracked(
+                status_cb,
+                {
+                    "phase": "curate_day",
+                    "task_id": f"curate_{_slugify(city['name'])}_{day_num}",
+                    "city": city["name"],
+                    "day": day_num,
+                    "group": "day_build",
+                    "detail": f"{len(day_cluster or [])} places",
+                },
+                self._search_and_curate_activities(
+                    city["name"], day_num, total_days, trip_style, help_with,
+                    all_city_names, None,
+                    user_memories=user_memories, traveler_type=traveler_type,
+                    user_interests=user_interests, day_places=day_cluster,
+                    preferences=ctx.get("preferences"), dates=ctx.get("startDate"),
+                ),
+            )
+
+        curated_results = await _bounded_gather(
+            [_curate_day(g, ci, d) for g, ci, d in day_specs], return_exceptions=True
+        )
+
+        # Reconcile duplicate picks post-hoc, in day order, per city.
+        used_by_city: dict[int, set[str]] = {}
+        day_activities: dict[int, list[dict]] = {}
+        for (gidx, ci, d), res in zip(day_specs, curated_results):
+            city = cities[ci]
+            used = used_by_city.setdefault(ci, set())
+            if isinstance(res, Exception):
+                logger.error(f"[ITINERARY_BUILDER] Day {gidx + 1} curation failed: {res}")
+                acts = self._llm_fallback_activities(city["name"], gidx + 1, total_days, trip_style)
+            else:
+                acts = res
+            clusters = city_clusters[ci]
+            day_cluster = clusters[d] if d < len(clusters) else None
+            day_activities[gidx] = self._reconcile_used_names(acts, day_cluster, used)
+
+        # Phase 2: travel times + time-slot assembly per day, concurrently.
+        async def _build_day_slots(gidx: int, ci: int) -> None:
+            city = cities[ci]
+            day_num = gidx + 1
+            slug = _slugify(city["name"])
+            day = itinerary.days[gidx]
+            activities = await _tracked(
+                status_cb,
+                {
+                    "phase": "travel_times",
+                    "task_id": f"travel_{slug}_{day_num}",
+                    "city": city["name"],
+                    "day": day_num,
+                    "group": "day_build",
+                },
+                self._compute_inter_activity_travel(day_activities[gidx], travel_mode),
+            )
+            # Chain time slots: each activity starts after the previous ends + travel time
+            time_slots = []
+            prev_end = "09:00"
+            for a in activities:
+                travel_info = a.get("travelInfo") or {}
+                travel_sec = travel_info.get("durationSeconds", 0)
+                slot = self._activity_to_time_slot(a, prev_end, travel_seconds=travel_sec)
+                prev_end = slot.endTime
+                time_slots.append(slot)
+            day.timeSlots = time_slots
+            await _emit(status_cb, {
+                "phase": "day_complete",
+                "state": "end",
+                "task_id": f"curate_{slug}_{day_num}",
+                "day": day.dayNumber,
+                "city": city["name"],
+                "group": "day_build",
+                "timeSlots": [ts.model_dump() for ts in time_slots],
+                "totalDays": total_days,
+            })
+
+        slot_results = await _bounded_gather(
+            [_build_day_slots(g, ci) for g, ci, _d in day_specs], return_exceptions=True
+        )
+        for (gidx, _ci, _d), res in zip(day_specs, slot_results):
+            if isinstance(res, Exception):
+                logger.error(f"[ITINERARY_BUILDER] Day {gidx + 1} slot build failed: {res}")
 
         if ctx.get("preferences"):
             itinerary.tripMetadata.preferences = ctx["preferences"]
         if ctx.get("travelType"):
             itinerary.tripMetadata.travelType = ctx["travelType"]
 
-        # Fetch hotel and restaurant recommendations per city (parallel across cities)
-        if status_cb:
-            await status_cb({"phase": "hotels_restaurants", "cities": [c["name"] for c in cities]})
+        # Fetch hotel/restaurant recommendations per city AND flights — all concurrent
         all_hotels: list[HotelRecommendation] = []
         all_restaurants: list[RestaurantRecommendation] = []
-        city_results = await asyncio.gather(
-            *(self._search_hotels_and_restaurants(city["name"], ctx) for city in cities),
-            return_exceptions=True,
+        city_results, flights = await asyncio.gather(
+            asyncio.gather(
+                *(
+                    _tracked(
+                        status_cb,
+                        {"phase": "hotels_restaurants", "task_id": f"hotels_{_slugify(c['name'])}",
+                         "city": c["name"], "group": "extras"},
+                        self._search_hotels_and_restaurants(c["name"], ctx),
+                    )
+                    for c in cities
+                ),
+                return_exceptions=True,
+            ),
+            _tracked(
+                status_cb,
+                {"phase": "flights", "task_id": "flights",
+                 "cities": [c["name"] for c in cities], "group": "extras"},
+                self._search_flights_for_trip(ctx),
+            ),
         )
         for res in city_results:
             if isinstance(res, Exception):
@@ -1086,11 +1298,6 @@ Respond with ONLY a JSON array of 2-5 objects:
             all_restaurants.extend(restaurants)
         itinerary.hotelRecommendations = all_hotels
         itinerary.restaurantRecommendations = all_restaurants
-
-        # Search flights if start location and dates are available
-        if status_cb:
-            await status_cb({"phase": "flights", "cities": [c["name"] for c in cities]})
-        flights = await self._search_flights_for_trip(ctx)
         itinerary.flightOptions = flights
 
         return {"itinerary": itinerary.model_dump()}
@@ -1205,14 +1412,15 @@ Respond with ONLY a JSON array of 2-5 objects:
             travel_class = prefs["cabinClass"]
 
         try:
-            flights_data = await serpapi_provider.search_flights(
+            flights_data = await _with_api_sem(partial(
+                serpapi_provider.search_flights,
                 origin=origin_code,
                 destination=dest_code,
                 departure_date=start_date[:10],
                 return_date=return_date,
                 adults=adults,
                 travel_class=travel_class,
-            )
+            ))
         except Exception as e:
             logger.error(f"[ITINERARY_BUILDER] Flight search failed: {e}")
             return []
@@ -1255,10 +1463,10 @@ Respond with ONLY a JSON array of 2-5 objects:
         "tokyo": "NRT", "osaka": "KIX", "kyoto": "KIX", "nagoya": "NGO",
         "sapporo": "CTS", "fukuoka": "FUK", "okinawa": "OKA",
         # USA
-        "new york": "JFK", "nyc": "JFK", "manhattan": "JFK",
-        "los angeles": "LAX", "la": "LAX", "san francisco": "SFO", "sf": "SFO",
+        "new york": "JFK", "manhattan": "JFK",
+        "los angeles": "LAX", "san francisco": "SFO",
         "chicago": "ORD", "miami": "MIA", "boston": "BOS", "seattle": "SEA",
-        "las vegas": "LAS", "washington": "IAD", "dc": "IAD", "atlanta": "ATL",
+        "las vegas": "LAS", "washington": "IAD", "atlanta": "ATL",
         "dallas": "DFW", "houston": "IAH", "denver": "DEN", "phoenix": "PHX",
         "san diego": "SAN", "portland": "PDX", "austin": "AUS",
         # Europe
@@ -1271,7 +1479,7 @@ Respond with ONLY a JSON array of 2-5 objects:
         "naples": "NAP", "nice": "NCE", "edinburgh": "EDI", "manchester": "MAN",
         # Asia Pacific
         "singapore": "SIN", "hong kong": "HKG", "bangkok": "BKK",
-        "kuala lumpur": "KUL", "kl": "KUL", "seoul": "ICN", "incheon": "ICN",
+        "kuala lumpur": "KUL", "seoul": "ICN", "incheon": "ICN",
         "beijing": "PEK", "shanghai": "PVG", "taipei": "TPE", "manila": "MNL",
         "jakarta": "CGK", "ho chi minh": "SGN", "saigon": "SGN", "hanoi": "HAN",
         "sydney": "SYD", "melbourne": "MEL", "brisbane": "BNE", "perth": "PER",
@@ -1287,29 +1495,40 @@ Respond with ONLY a JSON array of 2-5 objects:
         # Latin America
         "mexico city": "MEX", "cancun": "CUN", "bogota": "BOG",
         "lima": "LIM", "santiago": "SCL", "buenos aires": "EZE",
-        "rio de janeiro": "GIG", "rio": "GIG", "sao paulo": "GRU",
+        "rio de janeiro": "GIG", "sao paulo": "GRU",
         "havana": "HAV", "san jose": "SJO",
         # Iceland / Nordic
         "reykjavik": "KEF", "iceland": "KEF",
+    }
+
+    # Short abbreviations and common name variants → IATA code.
+    # Kept separate from _CITY_TO_IATA so it's clear these are deliberate
+    # aliases resolved by exact match only — never by prefix matching.
+    _CITY_ALIASES: dict[str, str] = {
+        "nyc": "JFK", "new york city": "JFK",
+        "la": "LAX", "sf": "SFO",
+        "dc": "IAD", "washington dc": "IAD",
+        "kl": "KUL", "rio": "GIG",
+        "ho chi minh city": "SGN",
     }
 
     @staticmethod
     async def _resolve_airport_code(city_name: str) -> str | None:
         """Resolve a city name to an IATA airport code.
 
-        Uses a hardcoded mapping of common cities. Falls back to None if
-        the city is not in the mapping (flight search will be skipped).
+        Exact (case-insensitive) match against _CITY_TO_IATA, then the
+        explicit _CITY_ALIASES table for abbreviations like "nyc" or "sf".
+        Returns None when there is no exact match — flight search is skipped.
         """
         if not city_name:
             return None
         key = city_name.lower().strip()
-        code = ItineraryBuilder._CITY_TO_IATA.get(key)
+        code = (
+            ItineraryBuilder._CITY_TO_IATA.get(key)
+            or ItineraryBuilder._CITY_ALIASES.get(key)
+        )
         if code:
             return code
-        # Try matching partial city name (e.g. "New York City" → "new york")
-        for mapped_key, mapped_code in ItineraryBuilder._CITY_TO_IATA.items():
-            if key.startswith(mapped_key) or mapped_key.startswith(key):
-                return mapped_code
         logger.warning(f"[ITINERARY_BUILDER] No IATA code found for {city_name!r}")
         return None
 
@@ -1328,60 +1547,98 @@ Respond with ONLY a JSON array of 2-5 objects:
 
         # --- SerpApi hotel path (with prices/amenities/booking) ---
         # Used when SerpApi is configured AND we have check-in/check-out dates.
-        serpapi_hotels: list[dict] = []
-        if settings.serpapi_api_key and ctx:
+        async def _serpapi_hotel_search() -> list[dict]:
+            if not (settings.serpapi_api_key and ctx):
+                return []
             start_date = ctx.get("startDate")
             duration = ctx.get("duration") or ctx.get("totalDays") or 1
-            if start_date:
-                try:
-                    from datetime import datetime as _dt, timedelta as _td
-                    dep = _dt.fromisoformat(start_date[:10]).date()
-                    checkout = (dep + _td(days=int(duration))).isoformat()
-                    adults = ctx.get("numberOfPeople", 1) or 1
-                    from app.services.serpapi_provider import serpapi_provider
-                    serpapi_hotels = await serpapi_provider.search_hotels(
-                        destination=city,
-                        check_in=start_date[:10],
-                        check_out=checkout,
-                        adults=adults,
-                    )
-                    logger.info(
-                        f"[ITINERARY_BUILDER] SerpApi hotels for {city}: "
-                        f"{len(serpapi_hotels)} results (check-in {start_date[:10]})"
-                    )
-                except Exception as e:
-                    logger.warning(f"[ITINERARY_BUILDER] SerpApi hotel search failed: {e}")
-                    serpapi_hotels = []
+            if not start_date:
+                return []
+            try:
+                from datetime import datetime as _dt, timedelta as _td
+                dep = _dt.fromisoformat(start_date[:10]).date()
+                checkout = (dep + _td(days=int(duration))).isoformat()
+                adults = ctx.get("numberOfPeople", 1) or 1
+                from app.services.serpapi_provider import serpapi_provider
+                results = await _with_api_sem(partial(
+                    serpapi_provider.search_hotels,
+                    destination=city,
+                    check_in=start_date[:10],
+                    check_out=checkout,
+                    adults=adults,
+                ))
+                logger.info(
+                    f"[ITINERARY_BUILDER] SerpApi hotels for {city}: "
+                    f"{len(results)} results (check-in {start_date[:10]})"
+                )
+                return results
+            except Exception as e:
+                logger.warning(f"[ITINERARY_BUILDER] SerpApi hotel search failed: {e}")
+                return []
 
-        hotel_queries = generate_hotel_queries(city)
-        restaurant_queries = generate_restaurant_queries(city)
+        async def _places_hotel_restaurant_search() -> tuple[list[dict], list[dict]]:
+            hotel_queries = generate_hotel_queries(city)
+            restaurant_queries = generate_restaurant_queries(city)
 
-        # Try text_search first (returns up to 20 results per query)
-        if settings.google_places_api_key:
-            hotel_tasks = [google_places.text_search(q, limit=5) for q in hotel_queries]
-            restaurant_tasks = [google_places.text_search(q, limit=5) for q in restaurant_queries]
-            hotel_results, restaurant_results = await asyncio.gather(
-                asyncio.gather(*hotel_tasks, return_exceptions=True),
-                asyncio.gather(*restaurant_tasks, return_exceptions=True),
-            )
-            hotel_places = []
-            for r in hotel_results:
-                if isinstance(r, list):
-                    hotel_places.extend(r)
-            restaurant_places = []
-            for r in restaurant_results:
-                if isinstance(r, list):
-                    restaurant_places.extend(r)
-        else:
-            # Fallback to places_search (MCP → OpenTripMap)
-            hotel_places, restaurant_places = await asyncio.gather(
-                places_search.search_multiple(hotel_queries, city, limit_per_query=3),
-                places_search.search_multiple(restaurant_queries, city, limit_per_query=3),
-            )
+            # Try text_search first (returns up to 20 results per query)
+            if settings.google_places_api_key:
+                hotel_tasks = [_with_api_sem(partial(google_places.text_search, q, limit=5)) for q in hotel_queries]
+                restaurant_tasks = [_with_api_sem(partial(google_places.text_search, q, limit=5)) for q in restaurant_queries]
+                hotel_results, restaurant_results = await asyncio.gather(
+                    asyncio.gather(*hotel_tasks, return_exceptions=True),
+                    asyncio.gather(*restaurant_tasks, return_exceptions=True),
+                )
+                hotel_places = []
+                for r in hotel_results:
+                    if isinstance(r, list):
+                        hotel_places.extend(r)
+                restaurant_places = []
+                for r in restaurant_results:
+                    if isinstance(r, list):
+                        restaurant_places.extend(r)
+            else:
+                # Fallback to places_search (MCP → OpenTripMap)
+                hotel_places, restaurant_places = await asyncio.gather(
+                    _with_api_sem(partial(places_search.search_multiple, hotel_queries, city, limit_per_query=3)),
+                    _with_api_sem(partial(places_search.search_multiple, restaurant_queries, city, limit_per_query=3)),
+                )
+            return hotel_places, restaurant_places
+
+        # SerpApi hotel search and Google Places searches run concurrently
+        serpapi_hotels, (hotel_places, restaurant_places) = await asyncio.gather(
+            _serpapi_hotel_search(),
+            _places_hotel_restaurant_search(),
+        )
 
         # Deduplicate by placeId and pick top 5 by rating
         hotels = self._dedupe_and_rank(hotel_places, max_results=5)
         restaurants = self._dedupe_and_rank(restaurant_places, max_results=5)
+
+        async def _resolve_place_photo(place: dict) -> str | None:
+            """Resolve a Google Places photo reference to a URL (bounded)."""
+            photo_url = place.get("photo_url", "")
+            if photo_url and not photo_url.startswith("http"):
+                try:
+                    resolved = await _with_api_sem(partial(google_places.resolve_photo_url, photo_url))
+                    if resolved:
+                        return resolved
+                    return photo_url
+                except Exception:
+                    return None
+            return photo_url or None
+
+        # Resolve photo references for all candidates concurrently.
+        # (Hotel photos are only needed when falling back to Places results.)
+        photo_targets = restaurants if serpapi_hotels else [*hotels, *restaurants]
+        photo_results = await asyncio.gather(
+            *(_resolve_place_photo(p) for p in photo_targets)
+        )
+        if serpapi_hotels:
+            hotel_photos: list[str | None] = []
+            restaurant_photos = photo_results
+        else:
+            hotel_photos = photo_results[:len(hotels)]
+            restaurant_photos = photo_results[len(hotels):]
 
         # --- Build hotel models ---
         # Prefer SerpApi results (with prices/amenities/booking) when available.
@@ -1429,18 +1686,7 @@ Respond with ONLY a JSON array of 2-5 objects:
                 ))
         else:
             # Fallback: Google Places text search (no prices/dates).
-            for h in hotels:
-                photo_url = h.get("photo_url", "")
-                if photo_url and not photo_url.startswith("http"):
-                    try:
-                        resolved = await google_places.resolve_photo_url(photo_url)
-                        if resolved:
-                            photo_url = resolved
-                    except Exception:
-                        photo_url = None
-                else:
-                    photo_url = photo_url or None
-
+            for h, photo_url in zip(hotels, hotel_photos):
                 hotel_models.append(HotelRecommendation(
                     name=h.get("name", ""),
                     placeId=h.get("placeId"),
@@ -1454,18 +1700,7 @@ Respond with ONLY a JSON array of 2-5 objects:
                 ))
 
         restaurant_models = []
-        for r in restaurants:
-            photo_url = r.get("photo_url", "")
-            if photo_url and not photo_url.startswith("http"):
-                try:
-                    resolved = await google_places.resolve_photo_url(photo_url)
-                    if resolved:
-                        photo_url = resolved
-                except Exception:
-                    photo_url = None
-            else:
-                photo_url = photo_url or None
-
+        for r, photo_url in zip(restaurants, restaurant_photos):
             # Extract cuisine from types
             types = r.get("types", [])
             cuisine = None

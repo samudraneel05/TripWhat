@@ -112,56 +112,6 @@ class DistanceMatrixService:
             logger.error(f"[DISTANCE_MATRIX] API call failed: {e}")
             return [self._empty_result(mode) for _ in pairs]
 
-    async def compute_consecutive_travel_times(
-        self,
-        activities: list[dict],
-        mode: str = "walking",
-    ) -> list[dict | None]:
-        """Compute travel times between consecutive activities in a day.
-
-        For activities [A, B, C], computes A→B and B→C.
-        Returns a list where result[i] is the travel time FROM activity[i] TO activity[i+1].
-        The last element is always None (no next activity).
-
-        Args:
-            activities: List of activity dicts with "coordinates" → {"lat", "lng"}
-            mode: "walking" or "driving"
-
-        Returns:
-            List of travel info dicts (or None for the last activity):
-            [{"distanceMeters": 1200, "durationSeconds": 900, "mode": "walking"}, ..., None]
-        """
-        if len(activities) <= 1:
-            return [None] * len(activities)
-
-        pairs = []
-        for i in range(len(activities) - 1):
-            origin_coords = self._get_coords(activities[i])
-            dest_coords = self._get_coords(activities[i + 1])
-            if origin_coords and dest_coords:
-                pairs.append({
-                    "origin": origin_coords,
-                    "destination": dest_coords,
-                })
-            else:
-                pairs.append(None)
-
-        # Filter out None pairs for the API call, then map results back
-        valid_pairs = [p for p in pairs if p is not None]
-        valid_results = await self.compute_travel_times(valid_pairs, mode)
-
-        # Map results back to the original positions
-        results = []
-        valid_idx = 0
-        for i in range(len(activities) - 1):
-            if pairs[i] is not None and valid_idx < len(valid_results):
-                results.append(valid_results[valid_idx])
-                valid_idx += 1
-            else:
-                results.append(None)
-        results.append(None)  # Last activity has no "next"
-        return results
-
     @staticmethod
     def _get_coords(activity: dict) -> dict | None:
         """Extract lat/lng from an activity dict."""

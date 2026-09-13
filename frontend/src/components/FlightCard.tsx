@@ -20,7 +20,7 @@ export interface FlightOption {
   returnLegs?: FlightLeg[];
   layovers: { airportCode: string; duration: number; overnight: boolean }[];
   totalDuration: number;
-  price: number;
+  price: number | null;
   currency: string;
   type: string;
   isBest: boolean;
@@ -101,10 +101,10 @@ export function FlightCard({ flight, onOpen }: { flight: FlightOption; onOpen?: 
         {/* Stops */}
         <span className="text-[10px] text-[var(--muted)] shrink-0">{stopsLabel}</span>
 
-        {/* Price */}
+        {/* Price — hidden when unknown (e.g. flights imported from email) */}
         <div className="ml-auto text-right shrink-0">
           <p className="text-sm font-semibold text-[var(--ink)]">
-            {flight.currency} {flight.price.toLocaleString()}
+            {flight.price ? `${flight.currency} ${flight.price.toLocaleString()}` : '—'}
           </p>
           <p className="text-[9px] text-[var(--muted)] capitalize">{flight.type}</p>
         </div>
