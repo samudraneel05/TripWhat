@@ -19,6 +19,17 @@ export default function NewTripPage() {
   const { conversationId: routeConvId } = useParams<{ conversationId?: string }>();
   const navigate = useNavigate();
   const initialQuery = searchParams.get('q') || '';
+
+  // Reset chat store on mount — this is a NEW trip, not a reopened one.
+  // Must run BEFORE any store selector below reads conversationId, or the
+  // first render captures the previous conversation's id and the URL-pin /
+  // socket effects bounce the user back to the old chat.
+  const resetRef = useRef(false);
+  if (!resetRef.current) {
+    resetRef.current = true;
+    useChatStore.getState().reset();
+  }
+
   const [localTripState, setLocalTripState] = useState<any>(null);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
@@ -27,17 +38,6 @@ export default function NewTripPage() {
   const { activeTab, setActiveTab, cityFilter, setCityFilter } = useUIStore();
   const tripIdRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<any>(null);
-
-  // Reset chat store on mount — this is a NEW trip, not a reopened one.
-  // Clears any stale conversationId, pendingInterrupt, and messages from a
-  // previous interrupted onboarding session.
-  // Done synchronously (not in useEffect) so ChatPanel's mount effect sees
-  // an empty store and starts fresh.
-  const resetRef = useRef(false);
-  if (!resetRef.current) {
-    resetRef.current = true;
-    useChatStore.getState().reset();
-  }
 
   // Sidebar links land here with ?tab=bookings|saved — honor the requested tab.
   useEffect(() => {
@@ -104,8 +104,11 @@ export default function NewTripPage() {
   // Once a new conversation exists, pin its id in the URL so reloads reopen
   // the chat instead of resetting to a blank /new.
   useEffect(() => {
-    if (conversationId && conversationId !== routeConvId) {
-      navigate(`/chat/${conversationId}`, { replace: true });
+    // Read the live value — a render-time closure can hold a stale id set
+    // between render and this effect's commit.
+    const convId = useChatStore.getState().conversationId;
+    if (convId && convId !== routeConvId) {
+      navigate(`/chat/${convId}`, { replace: true });
     }
   }, [conversationId, routeConvId, navigate]);
 
