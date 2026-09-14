@@ -47,19 +47,43 @@ class StreamBuffer:
 
     async def mark_active(self, conv_id: str):
         """Mark a conversation as having an active stream."""
-        r = await self._get_redis()
-        await r.set(self._active_key(conv_id), "streaming", ex=STREAM_TTL)
+        try:
+            r = await self._get_redis()
+            await r.set(self._active_key(conv_id), "streaming", ex=STREAM_TTL)
+        except Exception as e:
+            logger.warning(f"[STREAM_BUFFER] mark_active failed for {conv_id}: {e}")
 
     async def mark_done(self, conv_id: str):
         """Mark a conversation's stream as complete."""
-        r = await self._get_redis()
-        await r.delete(self._active_key(conv_id))
+        try:
+            r = await self._get_redis()
+            await r.delete(self._active_key(conv_id))
+        except Exception as e:
+            logger.warning(f"[STREAM_BUFFER] mark_done failed for {conv_id}: {e}")
 
     async def is_active(self, conv_id: str) -> bool:
-        """Check if a conversation has an active stream."""
-        r = await self._get_redis()
-        val = await r.get(self._active_key(conv_id))
-        return val == "streaming"
+        """Check if a conversation has an active stream. Returns False on
+        Redis failure — the in-process task registry is authoritative anyway."""
+        try:
+            r = await self._get_redis()
+            val = await r.get(self._active_key(conv_id))
+            return val == "streaming"
+        except Exception as e:
+            logger.warning(f"[STREAM_BUFFER] is_active failed for {conv_id}: {e}")
+            return False
+
+    async def clear_all_active(self) -> int:
+        """Delete every active:* flag — used at startup, where no run can
+        legitimately be live (in-process tasks die with the process)."""
+        try:
+            r = await self._get_redis()
+            keys = [k async for k in r.scan_iter("active:*")]
+            if keys:
+                return await r.delete(*keys)
+            return 0
+        except Exception as e:
+            logger.warning(f"[STREAM_BUFFER] clear_all_active failed: {e}")
+            return 0
 
     async def push_event(self, conv_id: str, event_type: str, data: dict) -> str | None:
         """Append an event to the Redis stream. Returns the entry ID or None on failure.

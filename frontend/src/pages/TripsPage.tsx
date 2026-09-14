@@ -13,7 +13,7 @@ export default function TripsPage() {
     fetchTrips();
     chatApi.listConversations()
       .then((res) => setConversations(res.data?.conversations || []))
-      .catch(() => {});
+      .catch((err) => console.warn('[TripsPage] Failed to load conversations:', err));
   }, [fetchTrips]);
 
   const filtered = trips.filter((t) => {
@@ -81,6 +81,12 @@ export default function TripsPage() {
                   <span className="text-sm text-[var(--ink)] truncate flex-1">
                     {c.preview || 'Untitled conversation'}
                   </span>
+                  {c.isActive && (
+                    <span className="flex items-center gap-1.5 text-[10px] text-[var(--muted)] shrink-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+                      generating
+                    </span>
+                  )}
                   {c.updatedAt && (
                     <span className="text-xs text-[var(--muted)] shrink-0">
                       {new Date(c.updatedAt).toLocaleDateString()}

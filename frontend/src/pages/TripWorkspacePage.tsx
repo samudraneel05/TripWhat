@@ -15,6 +15,17 @@ import { BookingsTab } from '../components/BookingsTab';
 
 export default function TripWorkspacePage() {
   const { id } = useParams<{ id: string }>();
+
+  // Fresh instance per trip (keyed route in App.jsx) — clear chat + trip
+  // view state synchronously on first render so the previously viewed
+  // conversation/trip can't bleed into this one while fetchTrip loads.
+  const resetRef = useRef(false);
+  if (!resetRef.current) {
+    resetRef.current = true;
+    useChatStore.getState().reset();
+    useTripStore.setState({ tripState: null, pendingDiff: null, progressiveDays: null });
+  }
+
   const { tripState, fetchTrip, connectSocket, disconnectSocket, setTripState, updateTrip, pendingDiff, acceptDiff, rejectDiff } = useTripStore();
   const conversationId = useChatStore((s) => s.conversationId);
   const { activeTab, setActiveTab, cityFilter, setCityFilter } = useUIStore();

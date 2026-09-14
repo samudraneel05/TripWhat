@@ -98,11 +98,18 @@ async def send_message(
     # check+add is atomic (no await between) so two rapid requests can't both
     # spawn a graph run on the same checkpoint thread. Must happen BEFORE we
     # persist the user message so a rejected send doesn't linger unanswered.
-    if conv_id in _active_conversations or await stream_buffer.is_active(conv_id):
+    if conv_id in _active_conversations:
         raise HTTPException(
             status_code=409,
             detail="A response is already being generated for this conversation",
         )
+    if await stream_buffer.is_active(conv_id):
+        # The Redis flag outlives process restarts — the in-process registry
+        # is authoritative, so a flag with no live task is a stale remnant of
+        # a dead run. Clear it instead of locking the conversation for the
+        # flag's TTL; the checkpoint resumes pending work on the next run.
+        logger.warning(f"[CHAT] Clearing stale active flag for {conv_id}")
+        await stream_buffer.mark_done(conv_id)
     _active_conversations.add(conv_id)
 
     try:
@@ -118,6 +125,9 @@ async def _start_stream(req, conv_id: str, user, db: AsyncSession):
     """Persist the user message and launch the background agent stream."""
     result = await db.execute(select(Conversation).where(Conversation.conversation_id == conv_id))
     conversation = result.scalar_one_or_none()
+
+    if conversation and conversation.user_id != user.id:
+        raise HTTPException(status_code=404, detail="Conversation not found")
 
     if not conversation:
         conversation = Conversation(
@@ -384,12 +394,13 @@ async def list_conversations(
     for c in result.scalars().all():
         preview = ""
         for m in c.messages or []:
-            if m.get("role") == "user":
+            if isinstance(m, dict) and m.get("role") == "user":
                 preview = (m.get("content") or "")[:80]
                 break
         items.append({
             "conversationId": c.conversation_id,
             "preview": preview,
+            "isActive": c.conversation_id in _active_conversations,
             "updatedAt": c.updated_at.isoformat() if c.updated_at else None,
         })
     return {"conversations": items}
@@ -402,7 +413,12 @@ async def get_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Conversation).where(Conversation.conversation_id == conversation_id))
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.conversation_id == conversation_id,
+            Conversation.user_id == user.id,
+        )
+    )
     conversation = result.scalar_one_or_none()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -449,12 +465,21 @@ async def get_stream_events(
     conversation_id: str,
     after: str = "0",
     user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
 ):
     """Replay buffered stream events for a conversation.
 
     Used by the frontend on reconnect to catch up on missed events.
     `after` is the last seen Redis stream entry ID (default "0" = all).
     """
+    result = await db.execute(
+        select(Conversation.id).where(
+            Conversation.conversation_id == conversation_id,
+            Conversation.user_id == user.id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     events = await stream_buffer.read_events(conversation_id, after_id=after)
     is_active = await stream_buffer.is_active(conversation_id)
     last_id = events[-1]["id"] if events else after
@@ -472,7 +497,12 @@ async def delete_conversation(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(Conversation).where(Conversation.conversation_id == conversation_id))
+    result = await db.execute(
+        select(Conversation).where(
+            Conversation.conversation_id == conversation_id,
+            Conversation.user_id == user.id,
+        )
+    )
     conversation = result.scalar_one_or_none()
     if not conversation:
         raise HTTPException(status_code=404, detail="Conversation not found")

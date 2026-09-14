@@ -4,6 +4,7 @@ import {
   Route,
   Navigate,
   useLocation,
+  useParams,
 } from "react-router-dom";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
@@ -38,6 +39,19 @@ function ProtectedRoute({ children }) {
   return <>{children}</>;
 }
 
+// Keyed wrappers: /new, /chat/:id, and /trip/:id each need a fresh component
+// instance per conversation/trip — without keys React Router reuses the same
+// instance and stale chat/trip state bleeds across conversations.
+function KeyedNewTripPage() {
+  const { conversationId } = useParams();
+  return <NewTripPage key={conversationId ?? "new"} />;
+}
+
+function KeyedTripWorkspacePage() {
+  const { id } = useParams();
+  return <TripWorkspacePage key={id} />;
+}
+
 function AppContent() {
   const { user } = useAuth();
 
@@ -65,7 +79,7 @@ function AppContent() {
           element={
             <ProtectedRoute>
               <AppLayout>
-                <TripWorkspacePage />
+                <KeyedTripWorkspacePage />
               </AppLayout>
             </ProtectedRoute>
           }
@@ -76,7 +90,7 @@ function AppContent() {
           element={
             <ProtectedRoute>
               <AppLayout>
-                <NewTripPage />
+                <KeyedNewTripPage />
               </AppLayout>
             </ProtectedRoute>
           }
@@ -87,7 +101,7 @@ function AppContent() {
           element={
             <ProtectedRoute>
               <AppLayout>
-                <NewTripPage />
+                <KeyedNewTripPage />
               </AppLayout>
             </ProtectedRoute>
           }

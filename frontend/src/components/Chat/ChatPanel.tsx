@@ -394,13 +394,22 @@ export function ChatPanel({
         }, 0);
       }
     } catch (err: any) {
-      setAssistantText("I'm sorry, I couldn't process your request. Please try again.");
+      const busy = err.response?.status === 409;
+      setAssistantText(
+        busy
+          ? "Still working on your previous message — it'll be answered shortly."
+          : "I'm sorry, I couldn't process your request. Please try again."
+      );
       setActiveWidget(null);
       useChatStore.getState().settleToolActivities(true);
-      setTimeout(() => {
-        setLoading(false);
-        setAgentStatus(null);
-      }, 0);
+      // On 409 a run is still in flight — its agent:response will clear
+      // loading when it lands, so don't clear it here.
+      if (!busy) {
+        setTimeout(() => {
+          setLoading(false);
+          setAgentStatus(null);
+        }, 0);
+      }
     }
   };
 

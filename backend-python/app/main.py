@@ -65,6 +65,13 @@ async def lifespan(app: FastAPI):
             travel_agent.set_persistence(checkpointer, store)
             set_store(store)
             logger.info("LangGraph Postgres checkpointer + store initialized")
+
+            # In-process agent tasks die with the process — clear any
+            # active:* flags left behind so those conversations aren't
+            # locked out by the 409 concurrency guard on the next send.
+            cleared = await stream_buffer.clear_all_active()
+            if cleared:
+                logger.info(f"Cleared {cleared} stale active-stream flags")
             yielded = True
             yield
     except Exception:

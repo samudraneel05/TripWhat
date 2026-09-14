@@ -56,7 +56,8 @@ interface TripStore {
   error: string | null;
   socket: Socket | null;
   pendingDiff: { tripState: TripState; changeSummary: any[] } | null;
-  lastEventId: string | null;
+  lastEventIds: Record<string, string>;
+  joinedConversationId: string | null;
   progressiveDays: { day: number; city: string; timeSlots: any[]; totalDays?: number }[] | null;
 
   fetchTrips: () => Promise<void>;
@@ -84,14 +85,15 @@ export const useTripStore = create<TripStore>((set, get) => ({
   error: null,
   socket: null,
   pendingDiff: null,
-  lastEventId: null,
+  lastEventIds: {},
+  joinedConversationId: null,
   progressiveDays: null,
 
   fetchTrips: async () => {
     set({ loading: true, error: null });
     try {
       const token = getToken();
-      const res = await fetch(`${API_URL}/api/saved-trips`, {
+      const res = await fetch(`${API_URL}/api/saved-trips?limit=100`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`Failed to fetch trips (${res.status})`);
@@ -112,10 +114,11 @@ export const useTripStore = create<TripStore>((set, get) => ({
       });
       if (!res.ok) throw new Error(`Failed to fetch trip (${res.status})`);
       const data = await res.json();
-      set({ tripState: data.tripState, loading: false });
-      if (data.conversationId) {
-        useChatStore.getState().setConversationId(data.conversationId);
-      }
+      set({ tripState: data.tripState ?? null, loading: false });
+      // Unconditional restore: a trip with no linked conversation must clear
+      // whatever conversation the store held — otherwise the previous
+      // conversation renders inside this trip's thread.
+      useChatStore.getState().setConversationId(data.conversationId ?? null);
       // Restore chat history. The conversation DB is the authoritative
       // record (the backend persists every turn, including widgets and tool
       // activities); the saved chatHistory is a client mirror that can lag a
@@ -139,9 +142,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
         }
       }
       useChatStore.getState().setPendingWidget(pendingWidget);
-      if (restored.length) {
-        useChatStore.getState().setMessages(restored);
-      }
+      useChatStore.getState().setMessages(restored);
     } catch (err: any) {
       set({ error: err.message, loading: false });
     }
@@ -189,11 +190,13 @@ export const useTripStore = create<TripStore>((set, get) => ({
     try {
       const token = getToken();
       const { messages, conversationId } = useChatStore.getState();
-      const payload = {
-        ...data,
-        chatHistory: serializeMessages(messages),
-        conversationId: conversationId,
-      };
+      const payload = { ...data };
+      // Only inject the store's chat history/link when they're non-empty —
+      // a save fired while the store holds another (or no) conversation must
+      // not wipe this trip's history or clobber its conversation link.
+      const serialized = serializeMessages(messages);
+      if (serialized.length) payload.chatHistory = serialized;
+      if (conversationId) payload.conversationId = conversationId;
       const res = await fetch(`${API_URL}/api/saved-trips/${id}`, {
         method: 'PUT',
         headers: {
@@ -233,16 +236,22 @@ export const useTripStore = create<TripStore>((set, get) => ({
   },
 
   connectSocket: (conversationId?: string) => {
+    // Join a conversation room, leaving whichever room we were in. Replay
+    // missed events first — events may have been emitted between the run
+    // starting and us joining the room.
+    const joinRoom = (sock: Socket, convId: string) => {
+      const prev = get().joinedConversationId;
+      if (prev === convId) return;
+      if (prev) sock.emit('leave:conversation', prev);
+      set({ joinedConversationId: convId });
+      get().replayMissedEvents(convId).then(() => {
+        sock.emit('join:conversation', convId);
+      });
+    };
+
     const existing = get().socket;
     if (existing) {
-      if (conversationId) {
-        // Replay missed events before joining the room — events may have been
-        // emitted between send_message starting the background task and us
-        // joining the room.
-        get().replayMissedEvents(conversationId).then(() => {
-          existing.emit('join:conversation', conversationId);
-        });
-      }
+      if (conversationId) joinRoom(existing, conversationId);
       return;
     }
 
@@ -253,19 +262,16 @@ export const useTripStore = create<TripStore>((set, get) => ({
       reconnectionDelay: 1000,
     });
 
-    socket.on('connect', async () => {
-      if (conversationId) {
-        // Replay missed events before joining the room for live updates
-        await get().replayMissedEvents(conversationId);
-        socket.emit('join:conversation', conversationId);
-      }
+    socket.on('connect', () => {
+      // Read the CURRENT conversation — the closure param is whichever
+      // conversation created the socket, which may be long gone.
+      const convId = useChatStore.getState().conversationId || conversationId;
+      if (convId) joinRoom(socket, convId);
     });
 
-    socket.on('reconnect', async () => {
-      if (conversationId) {
-        await get().replayMissedEvents(conversationId);
-        socket.emit('join:conversation', conversationId);
-      }
+    socket.on('reconnect', () => {
+      const convId = useChatStore.getState().conversationId || conversationId;
+      if (convId) joinRoom(socket, convId);
     });
 
     socket.on('trip:updated', (data: { trip: Trip; changeSummary?: any[] }) => {
@@ -282,13 +288,27 @@ export const useTripStore = create<TripStore>((set, get) => ({
       }
     });
 
-    // Streaming events from agent
+    // Streaming events from agent. The socket may still carry events from
+    // backgrounded conversations (rooms are joined lazily and outlive
+    // navigation) — every handler drops events that aren't for the
+    // conversation currently open in the chat store. Their state still
+    // lands in the Redis buffer + checkpoint and replays on resume.
+    const isCurrentConv = (data: { conversationId?: string }) =>
+      !!data.conversationId && data.conversationId === useChatStore.getState().conversationId;
+    const bumpCursor = (data: { conversationId?: string; eventId?: string }) => {
+      if (data.conversationId && data.eventId) {
+        set((s) => ({ lastEventIds: { ...s.lastEventIds, [data.conversationId!]: data.eventId! } }));
+      }
+    };
+
     socket.on('agent:token', (data: { conversationId: string; text: string; eventId?: string }) => {
-      if (data.eventId) set({ lastEventId: data.eventId });
+      bumpCursor(data);
+      if (!isCurrentConv(data)) return;
       useChatStore.getState().appendStreamingText(data.text);
     });
 
     socket.on('agent:status', (data: { conversationId: string; status: string }) => {
+      if (!isCurrentConv(data)) return;
       useChatStore.getState().setAgentStatus(data.status);
     });
 
@@ -296,7 +316,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
     // ChatPanel's own handler isn't registered (e.g. before it mounts) still
     // reach the UI via the lastWidget subscription.
     socket.on('agent:widget', (data: { conversationId: string; widget: any; eventId?: string }) => {
-      if (data.eventId) set({ lastEventId: data.eventId });
+      bumpCursor(data);
+      if (!isCurrentConv(data)) return;
       if (data.widget) {
         useChatStore.getState().setLastWidget(data.widget, data.conversationId);
       }
@@ -306,7 +327,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
       conversationId: string; toolName: string; label: string;
       callId: string; input?: any; group?: string; eventId?: string;
     }) => {
-      if (data.eventId) set({ lastEventId: data.eventId });
+      bumpCursor(data);
+      if (!isCurrentConv(data)) return;
       useChatStore.getState().addToolActivity({
         callId: data.callId,
         toolName: data.toolName,
@@ -320,7 +342,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
       conversationId: string; toolName: string; label: string;
       callId: string; summary?: string; error?: string | null; eventId?: string;
     }) => {
-      if (data.eventId) set({ lastEventId: data.eventId });
+      bumpCursor(data);
+      if (!isCurrentConv(data)) return;
       useChatStore.getState().updateToolActivity(data.callId, {
         status: data.error ? 'error' : 'finished',
         summary: data.summary,
@@ -332,7 +355,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
       conversationId: string; day: number; city: string;
       timeSlots: any[]; totalDays: number; eventId?: string;
     }) => {
-      if (data.eventId) set({ lastEventId: data.eventId });
+      bumpCursor(data);
+      if (!isCurrentConv(data)) return;
       set((state) => {
         const current = state.progressiveDays || [];
         const filtered = current.filter(d => d.day !== data.day);
@@ -348,6 +372,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
     });
 
     socket.on('agent:tripState', (data: { conversationId: string; tripState: any; changeSummary?: any[] }) => {
+      if (!isCurrentConv(data)) return;
       if (data.tripState) {
         if (data.changeSummary && data.changeSummary.length > 0) {
           set({
@@ -363,11 +388,9 @@ export const useTripStore = create<TripStore>((set, get) => ({
     });
 
     socket.on('agent:response', (data: any) => {
+      bumpCursor(data);
+      if (!isCurrentConv(data)) return;
       const chatStore = useChatStore.getState();
-
-      if (data.conversationId && !chatStore.conversationId) {
-        chatStore.setConversationId(data.conversationId);
-      }
 
       if (data.tripState) {
         get().setTripState(data.tripState);
@@ -414,7 +437,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
 
   replayMissedEvents: async (conversationId: string) => {
     try {
-      const { lastEventId } = get();
+      const lastEventId = get().lastEventIds[conversationId];
       const res = await chatApi.getStreamEvents(conversationId, lastEventId || undefined);
       const { events, isActive, lastEventId: newLastId } = res.data;
 
@@ -536,7 +559,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
       }
 
       if (newLastId) {
-        set({ lastEventId: newLastId });
+        set((s) => ({ lastEventIds: { ...s.lastEventIds, [conversationId]: newLastId } }));
       }
     } catch (err) {
       console.warn('[tripStore] Failed to replay missed events:', err);

@@ -73,11 +73,11 @@ export default function NewTripPage() {
         // Set pendingWidget BEFORE setMessages — ChatPanel's restore effect
         // reads it imperatively when rebuilding entries.
         chat.setPendingWidget(data.pendingWidget || null);
-        if (data.messages?.length) chat.setMessages(data.messages);
-        if (data.tripState) {
-          setTripState(data.tripState);
-          setLocalTripState(data.tripState);
-        }
+        // Unconditional restores — empty data must clear, not keep, whatever
+        // a previous conversation left in the store.
+        chat.setMessages(data.messages || []);
+        setTripState(data.tripState || null);
+        setLocalTripState(data.tripState || null);
         await fetchTrips();
         const linked = useTripStore.getState().trips.find(
           (t: any) => t.conversationId === routeConvId

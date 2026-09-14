@@ -480,7 +480,7 @@ class TravelAgent:
                 config=config,
                 context=runtime_context,
                 version="v3",
-                durability="async",
+                durability="sync",
             )
 
             # Consume messages and tool_calls concurrently.
