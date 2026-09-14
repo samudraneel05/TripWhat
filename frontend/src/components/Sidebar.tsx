@@ -66,7 +66,7 @@ export default function Sidebar() {
       style={{ transition: 'width 200ms var(--ease-out)' }}
     >
       {/* Brand + collapse */}
-      <div className="flex items-center gap-2 px-4 h-14 border-b border-[var(--border)]">
+      <div className="flex items-center gap-2 px-4 h-12 border-b border-[var(--border)]">
         <Link to="/trips" className="flex items-center gap-2 min-w-0">
           <div className="flex items-center justify-center w-7 h-7 rounded-lg bg-[var(--peach)] shrink-0">
             <Compass className="w-4 h-4 text-white" />
