@@ -15,6 +15,7 @@ import LandingPage from "./pages/LandingPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
 import TripsPage from "./pages/TripsPage.tsx";
+import ChatsPage from "./pages/ChatsPage.tsx";
 import TripWorkspacePage from "./pages/TripWorkspacePage.tsx";
 import NewTripPage from "./pages/NewTripPage.tsx";
 import ProfilePage from "./pages/ProfilePage.jsx";
@@ -69,6 +70,17 @@ function AppContent() {
             <ProtectedRoute>
               <AppLayout>
                 <TripsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/chats"
+          element={
+            <ProtectedRoute>
+              <AppLayout>
+                <ChatsPage />
               </AppLayout>
             </ProtectedRoute>
           }

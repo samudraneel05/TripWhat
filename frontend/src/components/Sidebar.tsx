@@ -2,11 +2,11 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useState, useEffect, useRef } from 'react';
 import {
   Home, Bell, Plus, Bookmark, Settings, ChevronLeft,
-  User, LogOut, Mail, Compass,
+  User, LogOut, Mail, Compass, MessageSquare, MessagesSquare,
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useUIStore } from '../stores/uiStore';
-import { gmailApi } from '../lib/api';
+import { gmailApi, chatApi } from '../lib/api';
 
 export default function Sidebar() {
   const { user, logout } = useAuth();
@@ -16,11 +16,18 @@ export default function Sidebar() {
   const [showProfileMenu, setShowProfileMenu] = useState(false);
   const [gmailConnected, setGmailConnected] = useState(false);
   const [gmailConnecting, setGmailConnecting] = useState(false);
+  const [recentChats, setRecentChats] = useState<any[]>([]);
   const profileRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     gmailApi.status().then((res) => setGmailConnected(res.data.connected)).catch(() => {});
   }, [location.search]);
+
+  useEffect(() => {
+    chatApi.listConversations()
+      .then((res) => setRecentChats((res.data?.conversations || []).slice(0, 5)))
+      .catch(() => {});
+  }, [location.pathname]);
 
   const handleConnectGmail = async () => {
     setGmailConnecting(true);
@@ -46,7 +53,8 @@ export default function Sidebar() {
   const w = collapsed ? 'w-[60px]' : 'w-[240px]';
 
   const navItems = [
-    { icon: Home, label: 'Home', path: '/trips' },
+    { icon: Home, label: 'Trips', path: '/trips' },
+    { icon: MessagesSquare, label: 'Chats', path: '/chats' },
     { icon: Bell, label: 'Notifications', path: '/notifications', badge: null },
   ];
 
@@ -119,6 +127,40 @@ export default function Sidebar() {
           </Link>
         ))}
       </nav>
+
+      {/* Recent chats — ChatGPT-style, always resumable */}
+      {!collapsed && recentChats.length > 0 && (
+        <div className="px-3 pt-4">
+          <p className="px-3 pb-1 text-[10px] font-medium uppercase tracking-wide text-[var(--muted)]">
+            Recent chats
+          </p>
+          <div className="space-y-0.5">
+            {recentChats.map((c) => (
+              <Link
+                key={c.conversationId}
+                to={`/chat/${c.conversationId}`}
+                className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs transition-colors ${
+                  location.pathname === `/chat/${c.conversationId}`
+                    ? 'bg-[var(--sage)] text-[var(--ink)]'
+                    : 'text-[var(--muted)] hover:bg-[var(--sage)] hover:text-[var(--ink)]'
+                }`}
+              >
+                <MessageSquare className="w-3 h-3 shrink-0" />
+                <span className="truncate flex-1">{c.preview || 'Untitled'}</span>
+                {c.isActive && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse shrink-0" />
+                )}
+              </Link>
+            ))}
+            <Link
+              to="/chats"
+              className="block px-3 py-1.5 text-[10px] text-[var(--muted)] hover:text-[var(--ink)] transition-colors"
+            >
+              All chats →
+            </Link>
+          </div>
+        </div>
+      )}
 
       {/* Divider */}
       <div className="mx-3 my-3 border-t border-[var(--border)]" />

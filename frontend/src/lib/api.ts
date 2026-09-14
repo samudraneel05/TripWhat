@@ -41,6 +41,8 @@ export const chatApi = {
     api.get(`/api/chat`),
   getStreamEvents: (conversationId: string, after?: string) =>
     api.get(`/api/chat/stream/${conversationId}`, { params: { after: after || '0' } }),
+  deleteConversation: (conversationId: string) =>
+    api.delete(`/api/chat/${conversationId}`),
 };
 
 export const tripsApi = {

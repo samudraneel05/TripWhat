@@ -23,10 +23,13 @@ export default function TripsPage() {
     return true;
   });
 
-  // Conversations not linked to a saved trip — chats still mid-planning that
-  // would otherwise have no way back in.
+  // Only actively-generating unlinked conversations surface here — the
+  // Chats section (sidebar + /chats) is the home for every other chat, so
+  // trips and conversations no longer fight for the same page.
   const linkedConvIds = new Set(trips.map((t) => t.conversationId).filter(Boolean));
-  const inProgress = conversations.filter((c) => !linkedConvIds.has(c.conversationId));
+  const inProgress = conversations.filter(
+    (c) => !linkedConvIds.has(c.conversationId) && c.isActive
+  );
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -68,7 +71,7 @@ export default function TripsPage() {
         {!loading && inProgress.length > 0 && (
           <div className="mb-6">
             <h2 className="text-xs font-medium text-[var(--muted)] uppercase tracking-wide mb-2">
-              In progress
+              Still planning
             </h2>
             <div className="space-y-1.5">
               {inProgress.map((c) => (

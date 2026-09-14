@@ -82,13 +82,24 @@ export default function NewTripPage() {
         const linked = useTripStore.getState().trips.find(
           (t: any) => t.conversationId === routeConvId
         );
-        if (linked) tripIdRef.current = linked.id;
+        if (linked) {
+          tripIdRef.current = linked.id;
+          // Smart upgrade: a conversation that already produced a real
+          // itinerary belongs in the trip workspace, not the bare chat view.
+          const hasItinerary =
+            (linked.generatedItinerary?.days?.length || 0) > 0 ||
+            (linked.tripState?.itinerary?.days?.length || 0) > 0;
+          if (hasItinerary) {
+            navigate(`/trip/${linked.id}`, { replace: true });
+            return;
+          }
+        }
       } catch (e) {
         console.error('Failed to resume conversation:', e);
       }
     })();
     return () => { cancelled = true; };
-  }, [routeConvId, fetchTrips, setTripState]);
+  }, [routeConvId, fetchTrips, setTripState, navigate]);
 
   // Once a new conversation exists, pin its id in the URL so reloads reopen
   // the chat instead of resetting to a blank /new.
