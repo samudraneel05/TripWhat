@@ -157,7 +157,7 @@ Honest limitations: TikTok needs the Apify tier (anonymous access is ~0%); the W
 
 The travel-AI category is full of demos that stop at a bulleted list. TripWhat is the only one where the loop actually closes: the reel you scrolled past becomes saved places, the saved places become an itinerary, the itinerary becomes calendar events and a confirmed booking — and your real inbox bookings fold in along the way. Every step is a real API call to a real external system, and every step is observable in LangSmith.
 
-## Why this is a strong fit for the Multi-App AI Agent Hackathon
+## Why this is a strong application
 
 - **12+ external apps, one coherent story.** Instagram/TikTok/YouTube, Gemini, Places, Gmail, Calendar, Duffel, OpenAI, Tavily, OpenTripMap, Geoapify, SerpApi, OpenWeather — each carries real weight in a single user journey, not bolted on to hit a count.
 - **Real actions, not read-only demos.** The agent creates calendar events, merges email bookings into trip state, and creates actual Duffel orders with booking references. Test mode is real infrastructure — the same code path runs live with a production token.
