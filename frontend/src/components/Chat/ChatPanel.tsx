@@ -704,9 +704,9 @@ export function ChatPanel({
       </div>
 
       {/* Composer */}
-      <div className="border-t border-[var(--border)] p-3 shrink-0">
+      <div className="border-t border-[var(--border)] px-3 py-2 shrink-0">
         <div className="max-w-[480px] mx-auto">
-          <div className="flex items-end gap-2 bg-[var(--bg)] border border-[var(--border)] rounded-2xl px-4 py-3 focus-within:border-[var(--muted)] transition-colors">
+          <div className="flex items-end gap-2 bg-[var(--bg)] border border-[var(--border)] rounded-xl px-3.5 py-2 focus-within:border-[var(--muted)] transition-colors">
             <textarea
               ref={inputRef}
               value={input}
@@ -724,8 +724,8 @@ export function ChatPanel({
               }}
               placeholder="Message TripWhat…"
               rows={1}
-              className="flex-1 bg-transparent text-sm text-[var(--ink)] placeholder:text-[var(--muted)] focus:outline-none resize-none leading-relaxed"
-              style={{ minHeight: '24px', maxHeight: '120px' }}
+              className="flex-1 bg-transparent text-sm text-[var(--ink)] placeholder:text-[var(--muted)] focus:outline-none resize-none leading-normal"
+              style={{ minHeight: '22px', maxHeight: '120px' }}
               disabled={isLoading}
             />
             <div className="flex items-center gap-1 shrink-0">
