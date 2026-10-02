@@ -130,9 +130,22 @@ async def mcp_compute_routes(origin: str, destination: str, travel_mode: str = "
     if not result:
         return f"Could not compute route from {origin} to {destination}."
 
-    distance = result.get("distanceMeters", "N/A")
-    duration = result.get("duration", "N/A")
-    return f"Route from {origin} to {destination} ({travel_mode}):\nDistance: {distance}m\nDuration: {duration}"
+    route = (result.get("routes") or [result])[0] or {}
+    distance = route.get("distanceMeters")
+    duration = route.get("duration", "")
+    if not distance:
+        return f"Could not compute route from {origin} to {destination}."
+
+    # duration arrives as "5064s" — render it readably
+    try:
+        secs = int(str(duration).rstrip("s"))
+        dur_text = f"{secs // 3600}h {(secs % 3600) // 60}m" if secs >= 3600 else f"{secs // 60} min"
+    except ValueError:
+        dur_text = str(duration)
+    return (
+        f"Route from {origin} to {destination} ({travel_mode}):\n"
+        f"Distance: {distance / 1000:.1f} km\nDuration: {dur_text}"
+    )
 
 
 @tool
@@ -144,16 +157,15 @@ async def mcp_lookup_weather(location: str, date: str = "") -> str:
         location: City or place name (e.g., "Tokyo, Japan")
         date: Optional specific date in YYYY-MM-DD format for a forecast. Omit for current conditions.
     """
-    args = {"location": {"address": location}}
-
+    date_obj = None
     if date:
         try:
             parts = date.split("-")
-            args["date"] = {"year": int(parts[0]), "month": int(parts[1]), "day": int(parts[2])}
+            date_obj = {"year": int(parts[0]), "month": int(parts[1]), "day": int(parts[2])}
         except (ValueError, IndexError):
             pass
 
-    result = await maps_mcp.lookup_weather(args)
+    result = await maps_mcp.lookup_weather({"address": location}, date_obj)
 
     if not result:
         return f"Could not look up weather for {location}."

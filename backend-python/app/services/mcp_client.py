@@ -76,6 +76,14 @@ class MapsMCPClient:
                 return None
 
             result = data.get("result", {})
+            if result.get("isError"):
+                msg = ""
+                for item in result.get("content") or []:
+                    if item.get("type") == "text":
+                        msg += item.get("text", "")
+                logger.error(f"[MCP] {tool_name} tool error: {msg[:300]}")
+                return None
+
             content = result.get("content", [])
             if content and isinstance(content, list):
                 for item in content:
