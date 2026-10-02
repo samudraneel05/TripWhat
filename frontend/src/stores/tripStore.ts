@@ -55,6 +55,7 @@ interface TripStore {
   loading: boolean;
   error: string | null;
   socket: Socket | null;
+  socketConnected: boolean;
   pendingDiff: { tripState: TripState; changeSummary: any[] } | null;
   lastEventIds: Record<string, string>;
   joinedConversationId: string | null;
@@ -84,6 +85,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
   loading: false,
   error: null,
   socket: null,
+  socketConnected: false,
   pendingDiff: null,
   lastEventIds: {},
   joinedConversationId: null,
@@ -256,20 +258,28 @@ export const useTripStore = create<TripStore>((set, get) => ({
     }
 
     const socket = io(SOCKET_URL, {
+      auth: (cb) => cb({ token: getToken() }),
       transports: ['websocket', 'polling'],
       reconnection: true,
-      reconnectionAttempts: 5,
+      reconnectionAttempts: Infinity,
       reconnectionDelay: 1000,
+      reconnectionDelayMax: 10000,
     });
 
     socket.on('connect', () => {
+      set({ socketConnected: true });
       // Read the CURRENT conversation — the closure param is whichever
       // conversation created the socket, which may be long gone.
       const convId = useChatStore.getState().conversationId || conversationId;
       if (convId) joinRoom(socket, convId);
     });
 
+    socket.on('disconnect', () => {
+      set({ socketConnected: false });
+    });
+
     socket.on('reconnect', () => {
+      set({ socketConnected: true });
       const convId = useChatStore.getState().conversationId || conversationId;
       if (convId) joinRoom(socket, convId);
     });
@@ -431,8 +441,9 @@ export const useTripStore = create<TripStore>((set, get) => ({
   },
 
   disconnectSocket: () => {
-    // Keep socket alive — only disconnect on explicit logout.
-    // Component unmounts should NOT kill the stream.
+    // Only call on logout — component unmounts must NOT kill the stream.
+    get().socket?.disconnect();
+    set({ socket: null, socketConnected: false, joinedConversationId: null });
   },
 
   replayMissedEvents: async (conversationId: string) => {

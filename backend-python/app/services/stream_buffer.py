@@ -142,7 +142,23 @@ class StreamBuffer:
                 last_id = batch[-1]["id"]
                 if len(batch) < count:
                     break  # stream exhausted
-            return events[: self.MAX_REPLAY_EVENTS]
+            if len(events) > self.MAX_REPLAY_EVENTS:
+                events = events[: self.MAX_REPLAY_EVENTS]
+                # A truncated replay must still deliver the terminal
+                # response event or the client never resolves the turn.
+                tail = await r.xrevrange(self._stream_key(conv_id), count=1)
+                if tail:
+                    entry_id, fields = tail[0]
+                    if fields.get("type") == "response" and (
+                        not events or events[-1]["id"] != entry_id
+                    ):
+                        events.append({
+                            "id": entry_id,
+                            "type": "response",
+                            "data": json.loads(fields.get("data", "{}")),
+                            "timestamp": fields.get("ts", ""),
+                        })
+            return events
         except Exception as e:
             logger.warning(f"[STREAM_BUFFER] Failed to read events for {conv_id}: {e}")
             return []

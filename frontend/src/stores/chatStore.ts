@@ -11,6 +11,8 @@ export interface ChatMessage {
   answeredQuestion?: string;
   /** On assistant messages: suggestion chips emitted with the response. */
   suggestions?: string[];
+  /** On assistant messages: the turn failed and `content` is a friendly error. */
+  error?: boolean;
 }
 
 export interface Widget {
@@ -44,6 +46,7 @@ export function serializeMessages(messages: ChatMessage[]): Record<string, any>[
     if (m.toolActivities?.length) out.toolActivities = m.toolActivities;
     if (m.answeredQuestion) out.answeredQuestion = m.answeredQuestion;
     if (m.suggestions?.length) out.suggestions = m.suggestions;
+    if (m.error) out.error = true;
     return out;
   });
 }

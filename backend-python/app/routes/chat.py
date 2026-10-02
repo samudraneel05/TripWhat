@@ -3,15 +3,20 @@
 import uuid
 import asyncio
 from datetime import datetime, timezone
+
+import httpx
+import openai
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import flag_modified
 
+from app.config import settings
 from app.database import get_db, async_session
 from app.deps import get_current_user
 from app.models import Conversation, User
 from app.schemas.chat import SendMessageRequest
+from app.services import rate_limit, run_registry
 from app.services.memory import get_user_memories
 from app.services.stream_buffer import stream_buffer
 from app.utils.logger import logger
@@ -21,11 +26,8 @@ router = APIRouter()
 # Cap persisted conversation history to keep the JSONB column bounded
 MAX_CONVERSATION_MESSAGES = 100
 
-# Per-conversation stream guard — one in-flight agent run per thread_id.
-# Two rapid send_message calls must not spawn two concurrent graph runs on the
-# same checkpoint thread. In-process set is race-free (check+add with no await
-# between); the Redis stream_buffer "active" flag is a cross-process backstop.
-_active_conversations: set[str] = set()
+# Global cap on concurrent agent runs, sized to the shared LLM TPM budget.
+_agent_run_semaphore = asyncio.Semaphore(settings.max_concurrent_agent_runs)
 
 # Strong refs for background stream tasks — asyncio.create_task results must
 # be held or the task can be garbage-collected mid-run.
@@ -65,6 +67,33 @@ async def _pending_widget_for(conversation_id: str) -> dict | None:
     return None
 
 
+def _langchain_error_types(*names: str) -> tuple[type, ...]:
+    try:
+        from langchain_openai.chat_models import base
+    except ImportError:
+        return ()
+    return tuple(t for t in (getattr(base, n, None) for n in names) if isinstance(t, type))
+
+
+_RATE_LIMIT_ERRORS = (openai.RateLimitError, *_langchain_error_types(
+    "OpenAIRateLimitError", "ModelRateLimitError"))
+_UPSTREAM_ERRORS = (
+    openai.APIConnectionError, openai.APITimeoutError,
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+    *_langchain_error_types("OpenAIConnectionError", "OpenAITimeoutError",
+                            "ModelConnectionError", "ModelTimeoutError"),
+)
+
+
+def _classify_error(exc: Exception) -> tuple[str, str]:
+    """Map an agent failure to a stable code and a user-safe message."""
+    if isinstance(exc, _RATE_LIMIT_ERRORS):
+        return "rate_limited", "TripWhat is a bit busy right now — please try again in a moment."
+    if isinstance(exc, _UPSTREAM_ERRORS):
+        return "upstream_unavailable", "I couldn't reach one of my services. Please try again."
+    return "internal", "Something went wrong on my side. Please try again."
+
+
 def _sanitize_json(obj):
     """Recursively convert non-JSON-serializable values (datetime, etc.) to strings."""
     if isinstance(obj, datetime):
@@ -92,32 +121,34 @@ async def send_message(
     if not req.message:
         raise HTTPException(status_code=400, detail="Message is required")
 
+    if not await rate_limit.hit(f"chat:user:{user.id}", settings.user_messages_per_minute, 60):
+        raise HTTPException(
+            status_code=429,
+            detail="You're sending messages quickly — give me a moment and try again.",
+        )
+    if await run_registry.active_count(user.id) >= settings.max_runs_per_user:
+        raise HTTPException(
+            status_code=429,
+            detail="I'm still working on your other requests — try again when they finish.",
+        )
+
     conv_id = req.conversationId or str(uuid.uuid4())
 
-    # Concurrency guard — one in-flight agent run per conversation. The
-    # check+add is atomic (no await between) so two rapid requests can't both
-    # spawn a graph run on the same checkpoint thread. Must happen BEFORE we
+    # Concurrency guard — one in-flight agent run per conversation, enforced
+    # via Redis so it holds across processes. The claim must happen BEFORE we
     # persist the user message so a rejected send doesn't linger unanswered.
-    if conv_id in _active_conversations:
+    if not await run_registry.acquire(conv_id, user.id):
         raise HTTPException(
             status_code=409,
             detail="A response is already being generated for this conversation",
         )
-    if await stream_buffer.is_active(conv_id):
-        # The Redis flag outlives process restarts — the in-process registry
-        # is authoritative, so a flag with no live task is a stale remnant of
-        # a dead run. Clear it instead of locking the conversation for the
-        # flag's TTL; the checkpoint resumes pending work on the next run.
-        logger.warning(f"[CHAT] Clearing stale active flag for {conv_id}")
-        await stream_buffer.mark_done(conv_id)
-    _active_conversations.add(conv_id)
 
     try:
         return await _start_stream(req, conv_id, user, db)
     except Exception:
         # Anything failing before the background task takes over must release
         # the guard or this conversation stays locked forever.
-        _active_conversations.discard(conv_id)
+        await run_registry.release(conv_id, user.id)
         raise
 
 
@@ -179,8 +210,12 @@ async def _start_stream(req, conv_id: str, user, db: AsyncSession):
 
     logger.info(f"Processing (streaming): {req.message!r}")
 
+    # New turn = new event stream. Replay after this only covers this turn;
+    # prior turns are already persisted in conversation.messages.
+    await stream_buffer.clear_stream(conv_id)
+
     # Mark stream as active and launch background task (strong-ref'd so it
-    # can't be GC'd mid-run; removed from the guard set in its finally).
+    # can't be GC'd mid-run; released in its finally).
     await stream_buffer.mark_active(conv_id)
     task = asyncio.create_task(_process_agent_stream(
         conv_id, req.message, agent_context, user.id
@@ -212,17 +247,41 @@ async def _process_agent_stream(
     # assistant message so the collapsed ToolActivityBar survives reloads.
     tool_activities: dict[str, dict] = {}
 
+    # Refresh the run-registry claim so long runs don't hit its TTL.
+    heartbeat_task = asyncio.create_task(_heartbeat_loop(conv_id, user_id))
+
+    # Token batching — one Redis event + one socket emit per batch instead of
+    # per token. Flush on size, on elapsed time, and before any other event.
+    pending_tokens: list[str] = []
+    last_flush = asyncio.get_running_loop().time()
+
+    async def flush_tokens():
+        nonlocal last_flush
+        if not pending_tokens:
+            return
+        text = "".join(pending_tokens)
+        pending_tokens.clear()
+        last_flush = asyncio.get_running_loop().time()
+        eid = await stream_buffer.push_event(conv_id, "token", {"text": text})
+        await sio.emit("agent:token", {
+            "conversationId": conv_id,
+            "text": text,
+            "eventId": eid,
+        }, room=conv_id)
+
+    await _agent_run_semaphore.acquire()
     try:
         async for event in travel_agent.chat_stream(message, conv_id, agent_context):
             if event["type"] == "token":
-                eid = await stream_buffer.push_event(conv_id, "token", {"text": event["text"]})
-                await sio.emit("agent:token", {
-                    "conversationId": conv_id,
-                    "text": event["text"],
-                    "eventId": eid,
-                }, room=conv_id)
+                pending_tokens.append(event["text"])
+                now = asyncio.get_running_loop().time()
+                if len(pending_tokens) >= 20 or now - last_flush >= 0.05:
+                    await flush_tokens()
+                continue
 
-            elif event["type"] == "status":
+            await flush_tokens()
+
+            if event["type"] == "status":
                 eid = await stream_buffer.push_event(conv_id, "status", {"status": event["status"]})
                 await sio.emit("agent:status", {
                     "conversationId": conv_id,
@@ -357,23 +416,57 @@ async def _process_agent_stream(
 
     except Exception as e:
         logger.error(f"[STREAM_TASK] Failed: {e}", exc_info=True)
+        error_code, error_message = _classify_error(e)
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(Conversation).where(Conversation.conversation_id == conv_id)
+                )
+                conversation = result.scalar_one_or_none()
+                if conversation:
+                    msgs = list(conversation.messages or [])
+                    msgs.append({
+                        "role": "assistant",
+                        "content": error_message,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "error": True,
+                    })
+                    conversation.messages = msgs[-MAX_CONVERSATION_MESSAGES:]
+                    flag_modified(conversation, "messages")
+                    await db.commit()
+        except Exception:
+            logger.exception("[STREAM_TASK] Failed to persist error message")
         error_payload = {
-            "message": "I'm sorry, I encountered an error processing your request.",
+            "message": error_message,
             "conversationId": conv_id,
             "widgets": [],
             "suggestions": [],
             "changeSummary": [],
             "classification": None,
             "tripState": None,
-            "error": str(e),
+            "error": error_code,
         }
         eid = await stream_buffer.push_event(conv_id, "response", error_payload)
         error_payload["eventId"] = eid
         await sio.emit("agent:response", error_payload, room=conv_id)
 
     finally:
-        _active_conversations.discard(conv_id)
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
+        await flush_tokens()
+        _agent_run_semaphore.release()
+        await run_registry.release(conv_id, user_id)
         await stream_buffer.mark_done(conv_id)
+
+
+async def _heartbeat_loop(conv_id: str, user_id: int) -> None:
+    """Refresh the run-registry claim while a stream task is live."""
+    while True:
+        await asyncio.sleep(30)
+        await run_registry.heartbeat(conv_id, user_id)
 
 
 @router.get("")
@@ -390,6 +483,7 @@ async def list_conversations(
         .order_by(Conversation.updated_at.desc())
         .limit(30)
     )
+    active_convs = await run_registry.active_for_user(user.id)
     items = []
     for c in result.scalars().all():
         preview = ""
@@ -400,7 +494,7 @@ async def list_conversations(
         items.append({
             "conversationId": c.conversation_id,
             "preview": preview,
-            "isActive": c.conversation_id in _active_conversations,
+            "isActive": c.conversation_id in active_convs,
             "updatedAt": c.updated_at.isoformat() if c.updated_at else None,
         })
     return {"conversations": items}

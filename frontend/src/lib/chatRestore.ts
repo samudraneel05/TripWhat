@@ -2,7 +2,7 @@ import type { ChatMessage, ToolActivity } from '../stores/chatStore';
 
 export type ChatEntry =
   | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string; widgets?: any[]; toolActivities?: ToolActivity[] }
+  | { kind: 'assistant'; text: string; widgets?: any[]; toolActivities?: ToolActivity[]; error?: boolean }
   | { kind: 'answered'; question: string; answerLabel: string };
 
 export interface ChatRestore {
@@ -73,6 +73,7 @@ export function buildChatRestore(messages: ChatMessage[], pendingWidget?: any): 
       text: m.content,
       widgets,
       toolActivities: m.toolActivities,
+      error: m.error,
     });
 
     // itinerary_summary persists once emitted (same as the live

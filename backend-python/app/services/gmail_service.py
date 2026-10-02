@@ -19,7 +19,6 @@ import html as html_lib
 import json
 import re
 import secrets
-from datetime import datetime, timezone
 
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
@@ -590,6 +589,8 @@ class GmailService:
                 model="gpt-4o-mini",
                 temperature=0,
                 model_kwargs={"response_format": {"type": "json_object"}},
+                max_retries=6,
+                timeout=60,
             )
             prompt = (
                 "Extract travel booking details from this email. Respond with a JSON object:\n"

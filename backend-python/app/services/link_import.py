@@ -472,7 +472,7 @@ async def run_import(url: str, user_id: int) -> dict:
     try:
         from app.main import sio
 
-        await sio.emit("saved:imported", payload)
+        await sio.emit("saved:imported", payload, room=f"user:{user_id}")
     except Exception as e:
         logger.warning(f"[link_import] socket emit failed: {e}")
     return payload

@@ -131,6 +131,8 @@ def _get_query_llm() -> ChatOpenAI:
             model="gpt-4o-mini",
             temperature=0.5,
             model_kwargs={"response_format": {"type": "json_object"}},
+            max_retries=6,
+            timeout=60,
         )
     return _query_llm
 

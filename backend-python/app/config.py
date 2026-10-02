@@ -1,5 +1,6 @@
 """Application configuration via pydantic-settings."""
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -62,8 +63,26 @@ class Settings(BaseSettings):
     google_video_understanding_key: str = ""  # Gemini API key for video understanding
     apify_token: str = ""                     # optional fallback scraper for IG/TikTok
     duffel_access_token: str = ""             # duffel_test_... — flight search + test booking
+    allow_live_bookings: bool = False         # must be true to book with a duffel_live_ token
+
+    # Agent capacity controls
+    fallback_model: str = "gpt-4o-mini"       # used when the primary model is rate-limited
+    max_concurrent_agent_runs: int = 8        # global cap on in-flight agent runs
+    max_runs_per_user: int = 2                # per-user cap on in-flight agent runs
+    user_messages_per_minute: int = 12        # per-user send limit
 
     model_config = {"env_file": ".env", "extra": "ignore"}
+
+    @model_validator(mode="after")
+    def _require_strong_jwt_secret_outside_dev(self):
+        if self.node_env.lower() not in ("development", "test") and (
+            self.jwt_secret == "fallback-secret" or len(self.jwt_secret) < 32
+        ):
+            raise ValueError(
+                "JWT_SECRET must be set to a random value of at least 32 characters "
+                f"when NODE_ENV is '{self.node_env}'"
+            )
+        return self
 
 
 settings = Settings()
