@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 
 from app.agents.travel_agent import TravelAgent
 from app.agents.state import create_default_trip_state, normalize_dates, distribute_nights
+from app.config import settings
 
 
 @pytest.fixture
@@ -351,3 +352,77 @@ async def test_no_interrupt_events(agent):
 
     # No interrupt events should be emitted
     assert not any(e.get("type") == "interrupt" for e in events)
+
+
+async def test_middleware_falls_back_on_rate_limit(agent, monkeypatch):
+    """A rate-limited primary model retries once on the fallback model."""
+    import openai
+    from langchain_core.messages import HumanMessage
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    middleware = agent._build_middleware()[1]  # dynamic_model_selection
+
+    calls = []
+
+    class FakeRequest:
+        state = {"trip_state": {}}
+        system_message = None
+        messages = [HumanMessage(content="plan a trip to tokyo")]
+
+        class runtime:
+            context = {}
+
+        def override(self, **kw):
+            calls.append(kw)
+            return self
+
+    def _rate_limit():
+        import httpx as hx
+        req = hx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        resp = hx.Response(429, request=req, json={"error": {"message": "rate limited"}})
+        return openai.RateLimitError("rate limited", response=resp, body=None)
+
+    async def handler(request):
+        if len(calls) == 1:
+            raise _rate_limit()
+        return "ok"
+
+    result = await middleware.awrap_model_call(FakeRequest(), handler)
+    assert result == "ok"
+    assert len(calls) == 2
+    assert calls[1]["model"].model_name == settings.fallback_model
+
+
+async def test_middleware_does_not_retry_other_errors(agent, monkeypatch):
+    from langchain_core.messages import HumanMessage
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    middleware = agent._build_middleware()[1]
+
+    class FakeRequest:
+        state = {"trip_state": {}}
+        system_message = None
+        messages = [HumanMessage(content="plan a trip to tokyo")]
+
+        class runtime:
+            context = {}
+
+        def override(self, **kw):
+            return self
+
+    async def handler(request):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        await middleware.awrap_model_call(FakeRequest(), handler)
+
+
+def test_interrupt_error_detection_covers_graph_interrupt():
+    from app.agents.travel_agent import _is_interrupt_error
+    from langgraph.errors import GraphInterrupt
+    from langgraph.types import Interrupt
+
+    intr = Interrupt(value={"question": "when?"})
+    assert _is_interrupt_error(GraphInterrupt((intr,))) is True
+    assert _is_interrupt_error(RuntimeError("boom")) is False
+    assert _is_interrupt_error(None) is False

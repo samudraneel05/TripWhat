@@ -114,12 +114,18 @@ class DistanceMatrixService:
 
     @staticmethod
     def _get_coords(activity: dict) -> dict | None:
-        """Extract lat/lng from an activity dict."""
-        coords = activity.get("coordinates") or {}
-        lat = coords.get("lat")
-        lng = coords.get("lng")
-        if lat is not None and lng is not None and lat != 0 and lng != 0:
-            return {"lat": lat, "lng": lng}
+        """Extract lat/lng from an activity dict — top-level coordinates first,
+        then the nested location.coordinates the editor/wire format uses."""
+        for coords in (
+            activity.get("coordinates"),
+            (activity.get("location") or {}).get("coordinates"),
+            ((activity.get("activity") or {}).get("location") or {}).get("coordinates"),
+        ):
+            if not isinstance(coords, dict):
+                continue
+            lat, lng = coords.get("lat"), coords.get("lng")
+            if lat is not None and lng is not None and lat != 0 and lng != 0:
+                return {"lat": lat, "lng": lng}
         return None
 
     @staticmethod

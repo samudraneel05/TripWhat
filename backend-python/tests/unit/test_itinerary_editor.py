@@ -1,57 +1,135 @@
-"""Tests for the itinerary editor."""
+"""Itinerary editor — structured results, positional ops, day swaps."""
 
-import pytest
-from app.services.itinerary_editor import itinerary_editor
-from app.schemas.itinerary import create_itinerary
-
-
-@pytest.mark.asyncio
-async def test_add_activity():
-    itinerary = create_itinerary("Tokyo", 3).model_dump()
-    action = {
-        "type": "add",
-        "target": {"day": 1, "timeSlot": "morning"},
-        "details": {"placeName": "Senso-ji Temple"},
-    }
-    result = await itinerary_editor.add_activity(itinerary, action, "Tokyo")
-    # The place search may return the actual name (e.g. "Sensō-ji" instead of "Senso-ji Temple")
-    assert "Added" in result["message"]
-    assert "Day 1" in result["message"]
-    day = result["itinerary"]["days"][0]
-    morning = next(s for s in day["timeSlots"] if s["period"] == "morning")
-    assert len(morning.get("activities", [])) > 0
+from app.services.itinerary_editor import ItineraryEditor, _period_for
+from app.schemas.itinerary import create_itinerary, create_time_slot, Activity
 
 
-def test_remove_activity():
-    itinerary = create_itinerary("Tokyo", 3).model_dump()
-    # First add an activity to both slot.activity and slot.activities
-    day = itinerary["days"][0]
-    morning = next(s for s in day["timeSlots"] if s["period"] == "morning")
-    act = {"id": "test-1", "title": "Senso-ji Temple"}
-    morning["activities"] = [act]
-    morning["activity"] = act
-
-    action = {
-        "type": "remove",
-        "target": {"day": 1, "activityId": "test-1"},
-    }
-    result = itinerary_editor.remove_activity(itinerary, action)
-    assert "Removed" in result["message"]
-    # The slot should be removed entirely (since it only held this one activity)
-    remaining_morning = [s for s in day["timeSlots"] if s.get("period") == "morning"]
-    assert len(remaining_morning) == 0
+def _itinerary_with_days(days=4):
+    itin = create_itinerary("Lisbon", days, "2027-03-05")
+    for i, d in enumerate(itin.days):
+        slots = []
+        for period in ("morning", "afternoon", "evening"):
+            act = Activity(
+                id=f"act-d{i + 1}-{period}",
+                title=f"{period.title()} activity D{i + 1}",
+                name=f"{period.title()} activity D{i + 1}",
+                type="attraction",
+            )
+            slots.append(create_time_slot(period, act))
+        d.timeSlots = slots
+    return itin.model_dump()
 
 
-def test_add_day():
-    itinerary = create_itinerary("Tokyo", 3).model_dump()
-    result = itinerary_editor.add_day(itinerary)
-    assert len(result["itinerary"]["days"]) == 4
-    assert result["itinerary"]["days"][3]["dayNumber"] == 4
+def test_swap_days_swaps_schedules_and_dates():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    day2_slots = [s["activity"]["title"] for s in itin["days"][1]["timeSlots"]]
+    day3_slots = [s["activity"]["title"] for s in itin["days"][2]["timeSlots"]]
 
-
-def test_remove_day():
-    itinerary = create_itinerary("Tokyo", 3).model_dump()
-    result = itinerary_editor.remove_day(itinerary, 2)
-    assert len(result["itinerary"]["days"]) == 2
-    # Day numbers should be renumbered
+    result = editor.swap_days(itin, 2, 3)
+    assert result["ok"] is True
     assert result["itinerary"]["days"][1]["dayNumber"] == 2
+    after2 = [s["activity"]["title"] for s in result["itinerary"]["days"][1]["timeSlots"]]
+    after3 = [s["activity"]["title"] for s in result["itinerary"]["days"][2]["timeSlots"]]
+    assert after2 == day3_slots
+    assert after3 == day2_slots
+
+
+def test_swap_days_rejects_bad_day():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.swap_days(itin, 2, 99)
+    assert result["ok"] is False
+    # Itinerary untouched
+    assert result["itinerary"]["days"][1]["timeSlots"][0]["activity"]["title"] == "Morning activity D2"
+
+
+def test_remove_activity_by_index():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.remove_activity(itin, {
+        "target": {"day": 1, "activityIndex": 2},
+    })
+    assert result["ok"] is True
+    remaining = [s["activity"]["title"] for s in result["itinerary"]["days"][0]["timeSlots"]]
+    assert "Afternoon activity D1" not in remaining
+    assert len(remaining) == 2
+
+
+def test_remove_activity_index_out_of_range_fails():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.remove_activity(itin, {
+        "target": {"day": 1, "activityIndex": 9},
+    })
+    assert result["ok"] is False
+    assert len(result["itinerary"]["days"][0]["timeSlots"]) == 3
+
+
+def test_remove_activity_fuzzy_name():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.remove_activity(itin, {
+        "target": {"day": 2, "activityName": "evening activity"},
+    })
+    assert result["ok"] is True
+    remaining = [s["activity"]["title"] for s in result["itinerary"]["days"][1]["timeSlots"]]
+    assert not any("Evening" in t for t in remaining)
+
+
+def test_remove_activity_reports_failure():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.remove_activity(itin, {
+        "target": {"day": 2, "activityName": "nonexistent place"},
+    })
+    assert result["ok"] is False
+    assert "not found" in result["message"].lower()
+    assert len(result["itinerary"]["days"][1]["timeSlots"]) == 3
+
+
+def test_move_activity_keeps_slot_order():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.move_activity(itin, {
+        "target": {"day": 1, "activityName": "morning activity d1"},
+        "details": {"newDay": 2, "newTimeSlot": "evening"},
+    })
+    assert result["ok"] is True
+    day2 = result["itinerary"]["days"][1]
+    periods = [s["period"] for s in day2["timeSlots"]]
+    assert periods == sorted(periods, key=["morning", "afternoon", "evening"].index)
+    assert day2["timeSlots"][-1]["activity"]["title"] == "Morning activity D1"
+    remaining_d1 = [s["activity"]["title"] for s in result["itinerary"]["days"][0]["timeSlots"]]
+    assert "Morning activity D1" not in remaining_d1
+
+
+def test_move_activity_bad_target_day_fails_without_mutation():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.move_activity(itin, {
+        "target": {"day": 1, "activityName": "morning activity d1"},
+        "details": {"newDay": 99},
+    })
+    assert result["ok"] is False
+    # Not silently dropped — the activity must still be on day 1
+    titles = [s["activity"]["title"] for s in result["itinerary"]["days"][0]["timeSlots"]]
+    assert "Morning activity D1" in titles
+
+
+def test_remove_day_out_of_range_fails():
+    editor = ItineraryEditor()
+    itin = _itinerary_with_days()
+    result = editor.remove_day(itin, 99)
+    assert result["ok"] is False
+    assert len(result["itinerary"]["days"]) == 4
+
+
+def test_period_for_time_hints():
+    assert _period_for("morning") == "morning"
+    assert _period_for("evening") == "evening"
+    assert _period_for("11am") == "morning"
+    assert _period_for("2pm") == "afternoon"
+    assert _period_for("8pm") == "evening"
+    assert _period_for("after lunch") == "afternoon"
+    assert _period_for(None) == "morning"

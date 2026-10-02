@@ -146,6 +146,20 @@ TYPE_DURATIONS = {
     "botanical_garden": 2.0, "memorial_park": 1.0, "national_monument": 1.5,
 }
 
+# Place types that should never be offered as day activities — the search pool
+# is broad ("top places", "things to do") and regularly returns these.
+_ACTIVITY_EXCLUDE_TYPES = {
+    "lodging", "hotel", "motel", "hostel", "resort_hotel", "extended_stay_hotel",
+    "convention_center", "business_center", "corporate_office", "coworking_space",
+    "travel_agency", "real_estate_agency", "moving_company", "storage",
+    "local_government_office", "city_hall", "embassy", "courthouse",
+    "insurance_agency", "bank", "atm", "pharmacy", "hospital", "dentist",
+    "doctor", "funeral_home", "cemetery", "veterinary_care", "car_dealer",
+    "car_rental", "car_repair", "car_wash", "gas_station", "parking",
+    "transit_station", "subway_station", "train_station", "bus_station",
+    "airport", "school", "primary_school", "secondary_school", "preschool",
+}
+
 
 class ItineraryBuilder:
     def __init__(self):
@@ -154,7 +168,7 @@ class ItineraryBuilder:
     @property
     def model(self):
         if self._model is None:
-            self._model = ChatOpenAI(model="gpt-4o-mini", temperature=0.7)
+            self._model = ChatOpenAI(model="gpt-4o-mini", temperature=0.7, max_retries=6, timeout=60)
         return self._model
 
     async def build(self, ctx: dict, status_cb=None) -> dict | None:
@@ -246,6 +260,12 @@ class ItineraryBuilder:
                 seen_names.add(name)
                 unique.append(p)
 
+        # Drop non-activity place types (hotels, convention centers, banks…)
+        unique = [
+            p for p in unique
+            if not (set(p.get("types") or []) & _ACTIVITY_EXCLUDE_TYPES)
+        ]
+
         logger.info(f"[ITINERARY_BUILDER] Found {len(unique)} unique places for {city}")
         return unique
 
@@ -276,9 +296,21 @@ class ItineraryBuilder:
         """
         # If a pre-clustered subset is provided, use it directly
         if day_places is not None:
-            places = day_places
+            places = [p for p in day_places
+                      if not (set(p.get("types") or []) & _ACTIVITY_EXCLUDE_TYPES)]
             if not places:
-                logger.warning(f"[ITINERARY_BUILDER] Empty cluster for {city} day {day_num}, using LLM fallback")
+                # Empty/exhausted cluster — re-search the city with a broad
+                # generic query before resorting to placeholder activities.
+                logger.info(f"[ITINERARY_BUILDER] Empty cluster for {city} day {day_num}; re-searching")
+                places = await _with_api_sem(partial(
+                    places_search.search_multiple,
+                    [f"top attractions in {city}", f"things to do in {city}"],
+                    city, limit_per_query=10,
+                )) or []
+                places = [p for p in places
+                          if not (set(p.get("types") or []) & _ACTIVITY_EXCLUDE_TYPES)]
+            if not places:
+                logger.warning(f"[ITINERARY_BUILDER] Still no places for {city} day {day_num}, using generic fallback")
                 return self._llm_fallback_activities(city, day_num, total_days, trip_style)
         else:
             # Legacy: search per day (no clustering)
@@ -310,6 +342,8 @@ class ItineraryBuilder:
             if not places:
                 logger.warning(f"[ITINERARY_BUILDER] No places found for {city}, using LLM fallback")
                 return self._llm_fallback_activities(city, day_num, total_days, trip_style)
+            places = [p for p in places
+                      if not (set(p.get("types") or []) & _ACTIVITY_EXCLUDE_TYPES)]
 
         # Step 3: LLM curation — pick best activities from real results
         return await self._curate_activities_llm(places, city, day_num, total_days, trip_style, all_city_names, used_names)
@@ -836,11 +870,15 @@ Respond with ONLY a JSON array of 2-5 objects:
         return result
 
     def _llm_fallback_activities(self, city: str, day_num: int, total_days: int, trip_style: str) -> list[dict]:
-        """Last resort: generate generic activities without real place data."""
+        """Last resort when no real place data exists. Labels are honest —
+        'free time to explore' not a fake venue — and flagged generic=True."""
         return [
-            {"period": "morning", "name": f"Explore {city}", "type": "sightseeing", "description": f"Start your day exploring the highlights of {city}.", "duration": "2-3 hours"},
-            {"period": "afternoon", "name": f"Local experience in {city}", "type": "culture", "description": f"Immerse yourself in the local culture and cuisine of {city}.", "duration": "2-3 hours"},
-            {"period": "evening", "name": f"Evening in {city}", "type": "relaxation", "description": f"Wind down and enjoy the evening atmosphere of {city}.", "duration": "1-2 hours"},
+            {"period": "morning", "name": f"Free morning to explore {city}", "type": "free_time",
+             "description": f"Unscheduled time — wander {city}'s center, revisit a favorite spot, or rest.", "duration": "2-3 hours", "generic": True},
+            {"period": "afternoon", "name": f"Free afternoon in {city}", "type": "free_time",
+             "description": f"Free time — explore a neighborhood or market in {city} at your own pace.", "duration": "2-3 hours", "generic": True},
+            {"period": "evening", "name": f"Evening in {city}", "type": "free_time",
+             "description": f"Open evening — dinner and a stroll through {city}.", "duration": "1-2 hours", "generic": True},
         ]
 
     def _activity_to_time_slot(self, act_data: dict, prev_end: str = "09:00", travel_seconds: int = 0) -> TimeSlot:
@@ -890,6 +928,7 @@ Respond with ONLY a JSON array of 2-5 objects:
             phoneNumber=act_data.get("phone"),
             travelInfo=travel_info,
             distanceToNext=act_data.get("distanceToNext"),
+            metadata={"generic": True} if act_data.get("generic") else {},
         )
         return TimeSlot(
             period=period,
@@ -1170,6 +1209,25 @@ Respond with ONLY a JSON array of 2-5 objects:
                     day.subtitle = self._generate_day_description(city["name"], day_idx + 1, total_days, trip_style)
                     day_specs.append((day_idx, ci, d))
                 day_idx += 1
+
+        # If the route math under-covers totalDays, don't leave trailing days
+        # unassigned — stretch the last city to fill them.
+        if cities and day_idx < len(itinerary.days):
+            ci = len(cities) - 1
+            city = cities[ci]
+            extra_d = cities[ci]["days"]
+            while day_idx < len(itinerary.days):
+                day = itinerary.days[day_idx]
+                day.location = city["name"]
+                day.title = f"Day {day_idx + 1} - {city['name']}"
+                day.subtitle = self._generate_day_description(city["name"], day_idx + 1, total_days, trip_style)
+                day_specs.append((day_idx, ci, extra_d))
+                extra_d += 1
+                day_idx += 1
+            logger.warning(
+                f"[ITINERARY_BUILDER] City day splits covered {sum(c['days'] for c in cities)} of "
+                f"{total_days} days — stretched {city['name']} to fill the gap"
+            )
 
         # Phase 1: curate every day of every city concurrently (bounded).
         # gather returns results aligned to day_specs order.
@@ -1644,6 +1702,25 @@ Respond with ONLY a JSON array of 2-5 objects:
         # Prefer SerpApi results (with prices/amenities/booking) when available.
         hotel_models: list[HotelRecommendation] = []
         if serpapi_hotels:
+            # Budget-aware ordering: stay within the nightly cap (~35% of a
+            # total/per-day trip budget) when we can, without dropping options.
+            budget = (ctx or {}).get("budget") or {}
+            nightly_cap = None
+            if budget.get("amount"):
+                if budget.get("scope") == "per_night":
+                    nightly_cap = budget["amount"]
+                else:
+                    nights = max(1, int(ctx.get("duration") or ctx.get("totalDays") or 1) - 1)
+                    share = 0.35 if budget.get("scope") == "total" else 0.30
+                    nightly_cap = (budget["amount"] * share) / nights
+            if nightly_cap:
+                serpapi_hotels = sorted(
+                    serpapi_hotels,
+                    key=lambda h: (
+                        0 if (h.get("ratePerNight") or 0) <= nightly_cap * 1.15 else 1,
+                        -(h.get("rating") or 0),
+                    ),
+                )
             for h in serpapi_hotels[:5]:
                 images = h.get("images") or []
                 image_url = images[0]["original"] if images and images[0].get("original") else None

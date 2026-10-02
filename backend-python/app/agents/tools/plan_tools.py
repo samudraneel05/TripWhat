@@ -29,6 +29,8 @@ async def _generate_route(cities: list[dict], total_nights: int, preferences: st
         model="gpt-4o-mini",
         temperature=0.3,
         model_kwargs={"response_format": {"type": "json_object"}},
+        max_retries=6,
+        timeout=60,
     )
     prefs_line = f"\nUser preferences: {preferences}\n" if preferences else ""
     prompt = f"""\
@@ -50,10 +52,16 @@ Respond with ONLY a JSON object with this exact structure:
 """
     try:
         response = await model.ainvoke([{"role": "user", "content": prompt}])
-        content = response.content if isinstance(response.content, str) else str(response.content)
-        # Handle list-of-content-blocks format from OpenAI
+        # Handle list-of-content-blocks format from OpenAI BEFORE stringifying —
+        # str(list) produces a Python repr that no JSON parser can read.
+        content = response.content
         if isinstance(content, list):
-            content = "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+            content = "".join(
+                b.get("text", "") for b in content
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        if not isinstance(content, str):
+            content = str(content)
         proposal = parse_json_robust(content)
         # parse_json_robust can return a list — route proposals must be objects
         if not isinstance(proposal, dict):
@@ -67,18 +75,72 @@ Respond with ONLY a JSON object with this exact structure:
             "rationale": f"Even split of {nights_per} nights per city.",
         }
 
-    # Validate
+    # Validate + reconcile: keep the LLM's ordering where it returned one, but
+    # the night splits MUST cover exactly the requested cities and sum to
+    # total_nights — otherwise downstream build produces the wrong day count.
     if not isinstance(proposal, dict) or not proposal.get("cities") or not isinstance(proposal["cities"], list):
-        nights_per = max(1, total_nights // len(cities))
-        proposal = {
-            "cities": [{"name": c["name"], "nights": nights_per, "order": i} for i, c in enumerate(cities)],
-            "totalNights": total_nights,
-            "rationale": f"Even split of {nights_per} nights per city.",
+        proposal = {"cities": [], "rationale": ""}
+
+    proposed = proposal.get("cities", [])
+    requested_names = [c["name"] for c in cities]
+    if proposed:
+        # LLM order first (it may be geographic), then any cities it dropped.
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for c in proposed:
+            for name in requested_names:
+                if name.lower() == str(c.get("name", "")).lower() and name not in seen:
+                    seen.add(name)
+                    ordered.append(name)
+        ordered.extend(n for n in requested_names if n not in seen)
+        llm_nights = {
+            name: 0 for name in requested_names
         }
+        for c in proposed:
+            for name in requested_names:
+                if name.lower() == str(c.get("name", "")).lower():
+                    try:
+                        llm_nights[name] = max(0, int(c.get("nights", 0)))
+                    except (TypeError, ValueError):
+                        llm_nights[name] = 0
+        normalized = [
+            {"name": name, "nights": llm_nights.get(name, 0), "order": i}
+            for i, name in enumerate(ordered)
+        ]
     else:
-        actual_nights = sum(c.get("nights", 0) for c in proposal["cities"])
-        if actual_nights != total_nights:
-            proposal["totalNights"] = actual_nights
+        normalized = [{"name": c["name"], "nights": 0, "order": i}
+                      for i, c in enumerate(cities)]
+
+    # Split the requested total across the cities: fill empty cities evenly,
+    # then push any diff onto the city with the most nights.
+    zero = [c for c in normalized if c["nights"] < 1]
+    if zero:
+        share = max(1, (total_nights - sum(c["nights"] for c in normalized)) // len(zero))
+        for c in zero:
+            c["nights"] = share
+    diff = total_nights - sum(c["nights"] for c in normalized)
+    if diff != 0:
+        anchor = max(normalized, key=lambda c: c["nights"]) if normalized else None
+        if anchor is not None:
+            anchor["nights"] = max(1, anchor["nights"] + diff)
+            # Rebalance if the subtraction went negative
+            while sum(c["nights"] for c in normalized) != total_nights:
+                under = total_nights - sum(c["nights"] for c in normalized)
+                for c in sorted(normalized, key=lambda x: x["nights"], reverse=True):
+                    if under == 0:
+                        break
+                    delta = 1 if under > 0 else -1
+                    if c["nights"] + delta >= 1:
+                        c["nights"] += delta
+                        under -= delta
+                else:
+                    break
+
+    proposal = {
+        "cities": normalized,
+        "totalNights": total_nights,
+        "rationale": proposal.get("rationale", "") if isinstance(proposal, dict) else "",
+    }
 
     logger.info(f"[PLAN_TRIP] Route: {json.dumps(proposal)}")
     return proposal
@@ -99,6 +161,8 @@ async def plan_trip(
     origin: str | None = None,
     travel_mode: str | None = None,
     pace: str | None = None,
+    interests: list[str] | str | None = None,
+    budget: str | int | None = None,
     preferences: str = "",
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
@@ -122,6 +186,12 @@ async def plan_trip(
                      "walking", "driving", or "transit" (default: walking)
         pace: Schedule pace — "relaxed", "moderate", or "packed". Pass it when
               the user expresses a pace preference (e.g. "slow-paced", "pack it in")
+        interests: ALL interests/activities the user mentioned as a list
+                   (e.g. ["food", "temples"], ["beaches", "nightlife"]). Do NOT
+                   drop secondary interests — pass every one the user stated.
+        budget: The user's budget if they gave one — a number or a phrase like
+                "800 total", "under $1500", "150 per night". Stored and used for
+                hotel/activity selection.
         preferences: Optional user preferences for route (e.g., "more nights in Tokyo")
 
     Normalizes parameters:
@@ -176,10 +246,23 @@ async def plan_trip(
         distribute_nights(trip_state, int(dur))
 
     # --- Dates ---
+    dates_in_past = False
+    dates_unparsed = False
     if dates is not None:
         normalized = normalize_dates(dates, trip_state.get("duration"))
         if normalized:
             trip_state["dates"] = normalized
+            try:
+                from datetime import date as _date, datetime as _dt
+                end_str = normalized.get("end")
+                if end_str and _dt.fromisoformat(str(end_str)).date() < _date.today():
+                    trip_state["dates"]["past"] = True
+                    dates_in_past = True
+            except (ValueError, TypeError):
+                pass
+        else:
+            dates_unparsed = True
+            logger.warning(f"[PLAN_TRIP] Could not normalize dates: {dates!r}")
 
     # --- Travelers ---
     if travelers:
@@ -242,6 +325,27 @@ async def plan_trip(
         elif p in ("moderate", "balanced", "medium", "normal"):
             trip_state["pace"] = "moderate"
 
+    # --- Interests (every interest the user stated) ---
+    if interests:
+        interest_list = [interests] if isinstance(interests, str) else list(interests)
+        prefs = trip_state.setdefault("preferences", [])
+        for i in interest_list:
+            i = str(i).strip()
+            if i and i not in prefs:
+                prefs.append(i)
+
+    # --- Budget ---
+    if budget is not None and str(budget).strip():
+        text = str(budget).strip()
+        amount_m = re.search(r"[\d,]+", text)
+        amount = int(amount_m.group().replace(",", "")) if amount_m else None
+        scope = "total"
+        if re.search(r"per\s*night|a\s*night|nightly", text, re.IGNORECASE):
+            scope = "per_night"
+        elif re.search(r"per\s*day|a\s*day|daily", text, re.IGNORECASE):
+            scope = "per_day"
+        trip_state["budget"] = {"amount": amount, "scope": scope, "text": text}
+
     # --- Route generation ---
     cities = trip_state.get("cities", [])
     total_nights = sum(c.get("nights", 0) for c in cities)
@@ -264,15 +368,33 @@ async def plan_trip(
         if d.get("assumed"):
             dates_str += " (assumed)"
 
+    warnings = []
+    if dates_in_past:
+        warnings.append(
+            "WARNING: the requested dates are in the past. Tell the user and ask "
+            "whether they meant next year — call ask_question — instead of building."
+        )
+    if dates_unparsed:
+        warnings.append(
+            f"WARNING: could not understand dates {dates!r}. Ask the user via "
+            "ask_question with concrete month options instead of guessing."
+        )
+    warnings_text = ("\n" + "\n".join(warnings)) if warnings else ""
+
     tool_msg = (
         f"Trip planned!\n"
         f"Route: {' → '.join(city_strs)}\n"
         f"Total: {sum(c.get('nights', 0) for c in (trip_state.get('routeProposal') or {}).get('cities', []))} nights\n"
-        f"{dates_str}\n"
+        f"{dates_str}{warnings_text}\n"
         f"The route is ready. Next, call build_itinerary to generate the "
         f"detailed day-by-day itinerary from this route, then briefly "
         f"confirm the plan to the user."
     )
+
+    # A fresh route proposal invalidates any existing itinerary — clear it so
+    # build_itinerary's guard lets the rebuild through and no stale plan is
+    # shown as current. (Right-wins merge: explicit None clears the key.)
+    trip_state["itinerary"] = None
 
     # Write back ONLY the keys this tool owns. The merge reducer is
     # right-wins per key, so returning the whole snapshot would let stale
@@ -280,7 +402,8 @@ async def plan_trip(
     # call in the same step.
     owned_keys = (
         "cities", "duration", "dates", "travelers", "tripStyle", "preferences",
-        "helpWith", "startLocation", "travelMode", "pace", "routeProposal", "version",
+        "helpWith", "startLocation", "travelMode", "pace", "routeProposal",
+        "budget", "version", "itinerary",
     )
     return Command(
         update={
@@ -304,6 +427,12 @@ async def ask_question(
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
     """Render a question card in the chat for the user to answer.
+
+    HARD LIMIT: only for gathering trip-planning parameters (dates, duration,
+    travelers, trip_style, help_with, city picks) while planning a trip.
+    NEVER call this for greetings, acknowledgments, refusals of non-travel
+    requests, questions the user asked YOU, or anything that isn't collecting
+    a planning parameter — respond in plain text with no tool call instead.
 
     Use this when you need information from the user to plan their trip.
     You decide what to ask based on what's already in trip_state — there is

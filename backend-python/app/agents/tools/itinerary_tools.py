@@ -89,8 +89,20 @@ async def build_itinerary(
     Call this immediately after the user confirms the route proposal.
     Searches for real places (hotels, restaurants, attractions) and assembles
     a day-by-day plan with time slots. No arguments needed — reads from trip state.
+
+    NEVER call this when trip_state already has an itinerary — for changes,
+    use edit_itinerary instead.
     """
     trip_state = state.get("trip_state") or {}
+    if trip_state.get("itinerary"):
+        return Command(
+            update={
+                "messages": [ToolMessage(
+                    content="An itinerary already exists — use edit_itinerary for changes; do not rebuild.",
+                    tool_call_id=tool_call_id,
+                )],
+            }
+        )
     build_cities = resolve_build_cities(trip_state)
     if not build_cities:
         return Command(
@@ -109,10 +121,14 @@ async def build_itinerary(
         "cities": build_cities,
         "totalDays": total_days,
         "travelType": trip_state.get("pace", "moderate"),
-        "numberOfPeople": travelers.get("adults", 1) if isinstance(travelers, dict) else 1,
+        "numberOfPeople": (
+            travelers.get("adults", 1) + travelers.get("children", 0)
+            if isinstance(travelers, dict) else 1
+        ),
         "preferences": trip_state.get("preferences", []),
         "tripStyle": trip_state.get("tripStyle", "balanced"),
         "helpWith": trip_state.get("helpWith", []),
+        "budget": trip_state.get("budget"),
     }
 
     # Pass startLocation for flight search if available
@@ -178,10 +194,24 @@ async def build_itinerary(
     # clobber keys another tool set in the same step (merge is right-wins).
     new_trip_state = {"itinerary": itinerary}
 
+    # Ground the model's summary in what was actually built — the reply must
+    # only describe these activities so it can't hallucinate places that
+    # aren't in the itinerary.
+    day_lines = []
+    for d in itinerary.get("days", []):
+        acts = [s.get("activity", {}).get("title") for s in d.get("timeSlots", [])
+                if s.get("activity")]
+        day_lines.append(
+            f"  Day {d.get('dayNumber')} ({d.get('location') or '?'}): "
+            + (", ".join(acts) if acts else "empty")
+        )
     tool_msg = (
-        f"Itinerary built successfully!\n"
+        f"Itinerary built!\n"
         f"Days: {len(itinerary.get('days', []))}\n"
-        f"Cities: {', '.join(c['name'] for c in build_cities)}"
+        f"Cities: {', '.join(c['name'] for c in build_cities)}\n"
+        f"Actual day-by-day plan:\n" + "\n".join(day_lines) + "\n"
+        "When you summarize this for the user, describe ONLY the activities "
+        "listed above — do not invent or mention places that aren't listed."
     )
 
     return Command(
@@ -199,24 +229,32 @@ async def edit_itinerary(
     time_slot: str | None = None,
     activity_name: str | None = None,
     activity_id: str | None = None,
+    activity_index: int | None = None,
     place_name: str | None = None,
     new_day: int | None = None,
     new_time_slot: str | None = None,
+    other_day: int | None = None,
+    time_of_day: str | None = None,
     state: Annotated[dict, InjectedState] = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = None,
 ) -> Command:
-    """Edit an existing itinerary by adding, removing, replacing, or moving activities.
-    Only call this when an itinerary already exists.
+    """Edit an existing itinerary. Only call this when an itinerary already exists.
 
     Args:
-        action_type: What to do — 'add', 'remove', 'replace', 'move', 'add_day', 'remove_day'
+        action_type: 'add', 'remove', 'replace', 'move', 'add_day', 'remove_day',
+                     or 'swap_days' (swap two days' full schedules)
         day: Target day number (1-indexed). Required for most actions.
-        time_slot: Target time slot — 'morning', 'afternoon', or 'evening'
-        activity_name: Name of the activity (for add/remove/replace)
-        activity_id: ID of the activity (for remove/move — use if you have it)
-        place_name: Real place name to add/replace (e.g., "Senso-ji Temple"). Search with mcp_search_places first.
-        new_day: Destination day number for move operations
-        new_time_slot: Destination time slot for move operations
+        time_slot: 'morning', 'afternoon', or 'evening'
+        activity_name: Name of the activity — "the Fado show" / "Fado" work
+        activity_id: ID of the activity (only if you actually know it)
+        activity_index: Position on the day (1 = first activity) — use this for
+                        "remove the third activity" when names are unknown
+        place_name: Real place name to add/replace (search mcp_search_places first)
+        new_day: Destination day for 'move'
+        new_time_slot: Destination slot for 'move'
+        other_day: The second day for 'swap_days'
+        time_of_day: Free-text time hint for 'add'/'move' — "morning", "11am",
+                     "evening" — mapped to the right slot
     """
     trip_state = state.get("trip_state") or {}
     itinerary = trip_state.get("itinerary")
@@ -235,15 +273,24 @@ async def edit_itinerary(
             "timeSlot": time_slot,
             "activityName": activity_name,
             "activityId": activity_id,
+            "activityIndex": activity_index,
         },
         "details": {
             "placeName": place_name or activity_name,
             "newDay": new_day,
             "newTimeSlot": new_time_slot,
+            "timeOfDay": time_of_day,
         },
     }
 
-    destination = (trip_state.get("cities") or [{}])[0].get("name", "the destination")
+    # The destination for place lookups is the city of the target day, which
+    # differs from the first city on multi-city itineraries.
+    days = itinerary.get("days", [])
+    destination = None
+    if day and 1 <= day <= len(days):
+        destination = days[day - 1].get("location")
+    if not destination:
+        destination = (trip_state.get("cities") or [{}])[0].get("name", "the destination")
 
     try:
         if action_type == "add":
@@ -254,6 +301,8 @@ async def edit_itinerary(
             result = await itinerary_editor.replace_activity(itinerary, action, destination)
         elif action_type == "move":
             result = itinerary_editor.move_activity(itinerary, action)
+        elif action_type == "swap_days":
+            result = itinerary_editor.swap_days(itinerary, day or 0, other_day or new_day or 0)
         elif action_type == "add_day":
             result = itinerary_editor.add_day(itinerary)
         elif action_type == "remove_day":
@@ -265,7 +314,23 @@ async def edit_itinerary(
                 }
             )
 
-        logger.info(f"[EDIT_ITINERARY] {action_type}: {result['message']}")
+        logger.info(f"[EDIT_ITINERARY] {action_type}: {result['message']} (ok={result.get('ok')})")
+
+        if not result.get("ok"):
+            # The model must hear the failure loudly, plus what's actually on
+            # the day so it can retry with the right name/index.
+            inventory = _day_inventory(itinerary, day)
+            msg = (
+                f"EDIT FAILED — the itinerary was NOT changed. {result['message']}."
+            )
+            if inventory:
+                msg += f" Day {day} currently has: {inventory}."
+            msg += " Correct the parameter and call edit_itinerary again, or tell the user it can't be done."
+            return Command(
+                update={
+                    "messages": [ToolMessage(content=msg, tool_call_id=tool_call_id)],
+                }
+            )
 
         # Write back only the itinerary key — see build_itinerary above.
         new_trip_state = {"itinerary": result["itinerary"]}
@@ -273,13 +338,33 @@ async def edit_itinerary(
         return Command(
             update={
                 "trip_state": new_trip_state,
-                "messages": [ToolMessage(content=result["message"], tool_call_id=tool_call_id)],
+                "messages": [ToolMessage(
+                    content=f"EDIT APPLIED — {result['message']}. Confirm it to the user accurately.",
+                    tool_call_id=tool_call_id,
+                )],
             }
         )
     except Exception as e:
         logger.error(f"[EDIT_ITINERARY] Error: {e}")
         return Command(
             update={
-                "messages": [ToolMessage(content=f"Failed to edit itinerary: {e}", tool_call_id=tool_call_id)],
+                "messages": [ToolMessage(content=f"EDIT FAILED — nothing was changed. Error: {type(e).__name__}", tool_call_id=tool_call_id)],
             }
         )
+
+
+def _day_inventory(itinerary: dict, day: int | None) -> str:
+    """Compact 'slot: title' listing of one day for grounding retry messages."""
+    days = itinerary.get("days", [])
+    if not day or not (1 <= day <= len(days)):
+        return ""
+    parts = []
+    for slot in days[day - 1].get("timeSlots", []):
+        title = (slot.get("activity") or {}).get("title")
+        if title:
+            parts.append(f"{slot.get('period', '?')}: {title}")
+        for act in slot.get("activities", []):
+            t = act.get("title")
+            if t and (not slot.get("activity") or t != title):
+                parts.append(f"{slot.get('period', '?')}: {t}")
+    return "; ".join(parts)

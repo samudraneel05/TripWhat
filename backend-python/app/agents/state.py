@@ -32,6 +32,7 @@ class TripState(TypedDict, total=False):
     bookings: Optional[list[dict]]  # parsed email booking confirmations
     startLocation: Optional[str]
     travelMode: Optional[str]  # walking | driving | transit (intra-city default: walking)
+    budget: Optional[dict]  # {amount, scope: "total"|"per_night"|"per_day", text}
     version: int
 
 
@@ -55,12 +56,14 @@ _MONTHS = {
 }
 
 
-def _assumed_dates_from_month(rough_month: str, duration: int | None = None) -> dict:
+def _assumed_dates_from_month(rough_month: str, duration: int | None = None,
+                              part: str | None = None) -> dict:
     """Convert a rough month name (or 'Oct 2026') to assumed concrete dates.
 
-    Picks the first Friday of the next occurrence of that month, and an end
-    date = start + (duration-1) days. Falls back to a 7-day trip if duration
-    is unknown.
+    Picks a Friday in the next occurrence of that month — first Friday by
+    default, nearest the 15th for "mid", last for "late"/"end of" — and an
+    end date = start + (duration-1) days. Falls back to a 7-day trip if
+    duration is unknown.
     """
     month_lower = (rough_month or "").lower().strip()
     target_month: int | None = None
@@ -99,10 +102,18 @@ def _assumed_dates_from_month(rough_month: str, duration: int | None = None) -> 
     else:
         year = target_year
 
-    # First Friday of that month.
+    # Friday in the right part of the month (default: first Friday).
     first_of_month = datetime(year, target_month + 1, 1)
-    days_until_friday = (4 - first_of_month.weekday()) % 7  # 4 = Friday
-    start = first_of_month + timedelta(days=days_until_friday)
+    if part in ("mid", "middle"):
+        target = first_of_month + timedelta(days=14)
+        start = target + timedelta(days=(4 - target.weekday()) % 7)
+    elif part in ("late", "end", "end of"):
+        next_month = datetime(year + (target_month + 2 > 12), (target_month + 2 - 1) % 12 + 1, 1)
+        last_of_month = next_month - timedelta(days=1)
+        start = last_of_month - timedelta(days=(last_of_month.weekday() - 4) % 7)
+    else:
+        days_until_friday = (4 - first_of_month.weekday()) % 7  # 4 = Friday
+        start = first_of_month + timedelta(days=days_until_friday)
     if start < today:
         start = start + timedelta(weeks=4)
 
@@ -169,6 +180,51 @@ def normalize_dates(dates: Any, duration: int | None = None) -> dict | None:
             dur = duration if duration and duration > 0 else 7
             end = start + timedelta(days=dur - 1)
             return {"start": m.group(1), "end": end.date().isoformat(), "assumed": False}
+
+        today = datetime.today()
+
+        # Relative phrases
+        if s in ("next week", "this week"):
+            start = today + timedelta(days=(7 - today.weekday()) % 7 or 7)
+            dur = duration if duration and duration > 0 else 7
+            return {"start": start.date().isoformat(),
+                    "end": (start + timedelta(days=dur - 1)).date().isoformat(),
+                    "assumed": True, "roughMonth": s}
+        if s in ("this weekend", "next weekend", "a weekend", "weekend"):
+            start = today + timedelta(days=(4 - today.weekday()) % 7 or 7)
+            dur = duration if duration and duration > 0 else 3
+            return {"start": start.date().isoformat(),
+                    "end": (start + timedelta(days=dur - 1)).date().isoformat(),
+                    "assumed": True, "roughMonth": s}
+
+        # Holidays — "christmas", "around christmas", "new year", "halloween"
+        h = re.sub(r"^(around|over|for|during|at|in|the)\s+", "", s)
+        _HOLIDAYS = {
+            "christmas": (12, 22), "xmas": (12, 22), "holidays": (12, 22),
+            "new year": (12, 29), "new year's": (12, 29), "new years": (12, 29),
+            "new year's eve": (12, 30), "halloween": (10, 29),
+            "valentine's day": (2, 12), "valentines day": (2, 12),
+        }
+        if h in _HOLIDAYS:
+            mo, day = _HOLIDAYS[h]
+            year = today.year if datetime(today.year, mo, day) > today else today.year + 1
+            start = datetime(year, mo, day)
+            dur = duration if duration and duration > 0 else 7
+            return {"start": start.date().isoformat(),
+                    "end": (start + timedelta(days=dur - 1)).date().isoformat(),
+                    "assumed": True, "roughMonth": s}
+
+        # "early/mid/late <month>" (optionally with year, allows hyphen)
+        m = re.match(r"^(early|mid|middle|late|end\s+of)[\s-]+([a-z]+)(?:\s+(\d{4}))?$", s)
+        if m and m.group(2) in _MONTHS:
+            rough = f"{m.group(2)} {m.group(3)}" if m.group(3) else m.group(2)
+            return _assumed_dates_from_month(rough, duration, part=m.group(1))
+
+        # "<month> weekend" / "weekend in <month>"
+        m = re.match(r"^(?:a\s+)?weekend\s+(?:in\s+)?([a-z]+)$", s) or \
+            re.match(r"^([a-z]+)\s+weekend$", s)
+        if m and m.group(1) in _MONTHS:
+            return _assumed_dates_from_month(m.group(1), duration or 3)
 
         # Month name or "Month Year" → assumed dates
         assumed = _assumed_dates_from_month(s, duration)
