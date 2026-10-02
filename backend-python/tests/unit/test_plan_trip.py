@@ -130,3 +130,70 @@ def test_normalize_dates_explicit_range_unchanged():
 def test_normalize_dates_past_range_is_returned_for_caller_flag():
     d = normalize_dates("2020-01-10 to 2020-01-14")
     assert d["start"] == "2020-01-10"  # caller (plan_trip) flags it as past
+
+
+# --- Destination validation -------------------------------------------------
+
+class _FakePlaces:
+    def __init__(self, table):
+        self.table = table
+
+    async def place_lookup(self, name):
+        return self.table.get(
+            name.lower(), {"status": "ZERO_RESULTS", "name": "", "types": []}
+        )
+
+
+def _patch_places(monkeypatch, table):
+    import app.services.google_places as gp  # noqa: F401 — force import
+    fake = _FakePlaces(table)
+    monkeypatch.setattr(gp, "google_places", fake)
+
+
+@pytest.mark.asyncio
+async def test_invalid_destinations_rejects_descriptions(monkeypatch):
+    _patch_places(monkeypatch, {
+        "paris": {"status": "OK", "name": "Paris", "types": ["locality", "political"]},
+    })
+    from app.agents.tools.plan_tools import _invalid_destinations
+    bad = await _invalid_destinations(["small beach towns", "Paris", "anywhere warm"])
+    assert set(bad) == {"small beach towns", "anywhere warm"}
+
+
+@pytest.mark.asyncio
+async def test_invalid_destinations_skips_when_api_down(monkeypatch):
+    _patch_places(monkeypatch, {})  # every name errors → ZERO_RESULTS... simulate outage:
+    import app.agents.tools.plan_tools as pt
+    import sys
+
+    class DownPlaces:
+        async def place_lookup(self, name):
+            return {"status": "REQUEST_DENIED", "name": "", "types": []}
+
+    import app.services.google_places as gp
+    monkeypatch.setattr(gp, "google_places", DownPlaces())
+    bad = await pt._invalid_destinations(["small beach towns"])
+    assert bad == []  # outage must not block planning
+
+
+@pytest.mark.asyncio
+async def test_plan_trip_rejects_non_place_destination(monkeypatch):
+    from langchain_core.messages import ToolMessage
+    from app.agents.tools import plan_tools as pt
+
+    _patch_places(monkeypatch, {})
+    res = await pt.plan_trip.ainvoke({
+        "name": "plan_trip",
+        "type": "tool_call",
+        "id": "call_1",
+        "args": {
+            "destination": "small beach towns",
+            "duration": 5,
+            "dates": "2027-01",
+            "state": {"trip_state": {}},
+            "tool_call_id": "x",
+        },
+    })
+    assert isinstance(res.update["messages"][0], ToolMessage)
+    assert "Not valid destinations" in res.update["messages"][0].content
+    assert "trip_state" not in res.update or not res.update["trip_state"].get("cities")

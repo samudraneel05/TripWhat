@@ -136,6 +136,35 @@ class GooglePlacesService:
                 })
             return results
 
+    async def place_lookup(self, name: str) -> dict:
+        """Resolve a name to place types — used to validate destinations.
+
+        Returns {"status": "OK"|"ZERO_RESULTS"|"REQUEST_DENIED"|...,
+                 "types": [top-hit types]} so callers can distinguish a
+        name that isn't a place from an API outage.
+        """
+        if not settings.google_places_api_key:
+            return {"status": "UNCONFIGURED", "name": "", "types": []}
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(
+                    f"{self.BASE_URL}/textsearch/json",
+                    params={
+                        "query": name,
+                        "fields": "name,types",
+                        "key": settings.google_places_api_key,
+                    },
+                )
+                data = resp.json()
+        except Exception:
+            return {"status": "ERROR", "name": "", "types": []}
+        results = data.get("results") or []
+        return {
+            "status": data.get("status", "UNKNOWN"),
+            "name": results[0].get("name", "") if results else "",
+            "types": results[0].get("types", []) if results else [],
+        }
+
     async def find_nearby(self, lat: float, lng: float, radius: int = 5000, place_type: str = "tourist_attraction") -> list[dict]:
         if not settings.google_places_api_key:
             return []

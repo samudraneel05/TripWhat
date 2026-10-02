@@ -1,5 +1,6 @@
 """Plan tools — plan_trip (one-shot ingestion + route) and ask_question (LLM-driven rendering)."""
 
+import asyncio
 import json
 import re
 from typing import Annotated
@@ -123,7 +124,7 @@ Respond with ONLY a JSON object with this exact structure:
         anchor = max(normalized, key=lambda c: c["nights"]) if normalized else None
         if anchor is not None:
             anchor["nights"] = max(1, anchor["nights"] + diff)
-            # Rebalance if the subtraction went negative
+            # Rebalance if the clamp left a residual diff
             while sum(c["nights"] for c in normalized) != total_nights:
                 under = total_nights - sum(c["nights"] for c in normalized)
                 for c in sorted(normalized, key=lambda x: x["nights"], reverse=True):
@@ -135,7 +136,6 @@ Respond with ONLY a JSON object with this exact structure:
                         under -= delta
                 else:
                     break
-
     proposal = {
         "cities": normalized,
         "totalNights": total_nights,
@@ -144,6 +144,56 @@ Respond with ONLY a JSON object with this exact structure:
 
     logger.info(f"[PLAN_TRIP] Route: {json.dumps(proposal)}")
     return proposal
+
+
+# ---------------------------------------------------------------------------
+# Destination validation — reject descriptions masquerading as cities
+# ---------------------------------------------------------------------------
+
+# Google Places types that count as a real destination (city/region/country).
+# Continents and generic descriptors ("small beach towns", "northern italy")
+# don't resolve to these — they either return no results or non-place types.
+_DESTINATION_TYPES = {
+    "locality", "sublocality", "sublocality_level_1", "postal_town",
+    "administrative_area_level_1", "administrative_area_level_2",
+    "administrative_area_level_3", "country",
+}
+
+# Strings users (and question cards) produce that are never a place — drop
+# them before validation so "you_decide" isn't geocoded.
+_NON_PLACE_WORDS = {
+    "you_decide", "you decide", "anywhere", "anywhere really", "anywhere warm",
+    "surprise me", "surprise", "flexible", "any", "i don't know", "idk",
+    "somewhere", "somewhere warm", "no preference", "whatever", "wherever",
+}
+
+
+async def _invalid_destinations(names: list[str]) -> list[str]:
+    """Return the names that don't resolve to a real place via Google Places.
+
+    Guards against the model passing a *description* ("small beach towns",
+    "somewhere warm") as a city — downstream searches then fan out globally
+    and assemble a multi-continent itinerary. Lookups that error out (quota,
+    network, missing key) are treated as unknown and don't block the name —
+    we only reject when Google positively says the name isn't a place.
+    """
+    from app.services.google_places import google_places
+
+    if not names:
+        return []
+
+    async def _check(name: str) -> bool | None:
+        hit = await google_places.place_lookup(name)
+        if hit["status"] == "OK":
+            return bool(set(hit["types"]) & _DESTINATION_TYPES)
+        if hit["status"] == "ZERO_RESULTS":
+            return False
+        return None  # REQUEST_DENIED / ERROR / UNCONFIGURED — can't tell
+
+    results = await asyncio.gather(*(_check(n) for n in names))
+    if all(r is None for r in results):
+        return []  # validator unavailable — don't block planning
+    return [n for n, r in zip(names, results) if r is False]
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +222,12 @@ async def plan_trip(
     response and proceed.
 
     Args:
-        destination: City or list of cities (e.g., "Tokyo" or ["Tokyo", "Kyoto", "Osaka"])
+        destination: City or list of cities (e.g., "Tokyo" or ["Tokyo", "Kyoto", "Osaka"]).
+               Must be REAL NAMED places — countries/regions are fine
+               ("Vietnam", "Tuscany"), but NEVER a description ("small beach
+               towns", "somewhere quiet") or a continent ("Europe"). Those
+               get rejected — substitute concrete cities matching the user's
+               stated preferences, or ask them to pick via ask_question.
         dates: When — month name ("October", "December"), month+year ("Oct 2026"),
                date range ("2026-10-10 to 2026-10-20"), "flexible"/"any", or
                {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}
@@ -211,12 +266,66 @@ async def plan_trip(
     trip_state = dict(trip_state)
 
     # --- Destination ---
+    # Accepts a list (of strings or {name} dicts), or a string split on
+    # commas / "/" / " and " / " then ". "Paris and Rome" as one string must
+    # become two cities — but "Trinidad and Tobago" is one country, so when
+    # the joined name itself resolves to a place whose name matches the
+    # input, keep it whole.
     if isinstance(destination, list):
-        city_list = [str(c).strip() for c in destination if str(c).strip()]
-    elif isinstance(destination, str) and "," in destination:
-        city_list = [c.strip() for c in destination.split(",") if c.strip()]
+        raw = [str(c.get("name", c) if isinstance(c, dict) else c).strip() for c in destination]
+    elif isinstance(destination, str):
+        raw = [p.strip() for p in re.split(r"\s*[,/]\s*|\s+&\s+|\s+(?:and|then)\s+", destination)]
+        if len(raw) > 1:
+            from app.services.google_places import google_places
+            whole = await google_places.place_lookup(destination)
+            hit = (whole.get("name") or "").lower()
+            if whole["status"] == "OK" and hit and (
+                hit == destination.strip().lower()
+                or destination.strip().lower() in hit
+                or hit in destination.strip().lower()
+            ):
+                raw = [destination.strip()]
     else:
-        city_list = [str(destination).strip()]
+        raw = [str(destination).strip()]
+    city_list = [c for c in raw if c and c.lower() not in _NON_PLACE_WORDS]
+    if not city_list:
+        return Command(
+            update={
+                "messages": [ToolMessage(
+                    content=(
+                        "No usable destination was provided. Suggest 2-3 "
+                        "concrete named places that match the user's stated "
+                        "preferences, or call ask_question with destination "
+                        "options for them to pick."
+                    ),
+                    tool_call_id=tool_call_id,
+                )],
+            }
+        )
+
+    # Guard: each entry must be a real named place, not a description of one
+    # (e.g. "small beach towns") — without this, downstream place searches
+    # fan out globally and the itinerary mixes continents.
+    invalid = await _invalid_destinations(city_list)
+    if invalid:
+        logger.warning(f"[PLAN_TRIP] Rejected non-place destinations: {invalid}")
+        return Command(
+            update={
+                "messages": [ToolMessage(
+                    content=(
+                        f"Not valid destinations: {', '.join(invalid)} — they don't "
+                        "resolve to a real city/region/country. Either substitute "
+                        "concrete named places that match what the user described "
+                        "(e.g. 'small beach towns' → 'Palolem, Goa' or 'Cadaqués, "
+                        "Spain'), or call ask_question to let the user pick between "
+                        "your top suggestions. Don't call plan_trip again until "
+                        "every destination is a real named place."
+                    ),
+                    tool_call_id=tool_call_id,
+                )],
+            }
+        )
+
     trip_state["cities"] = [{"name": c, "order": i} for i, c in enumerate(city_list)]
 
     # --- Duration ---
