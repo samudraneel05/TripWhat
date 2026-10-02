@@ -12,7 +12,6 @@ from app.schemas.itinerary import (
     FlightOption,
     HotelRecommendation,
 )
-from app.utils.logger import logger
 
 
 def _date_of(iso_str: str | None) -> str | None:

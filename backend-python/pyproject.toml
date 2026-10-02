@@ -29,6 +29,7 @@ dependencies = [
     "redis>=5.0.0",
     "yt-dlp>=2025.1.0",
     "google-genai>=1.0.0",
+    "langchain-tavily>=0.2.18",
 ]
 
 [project.optional-dependencies]

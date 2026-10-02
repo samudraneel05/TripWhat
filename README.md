@@ -50,8 +50,8 @@ This is the part most hackathon agents skip — we built it in:
 ## Reliability & testing
 
 ```bash
-cd backend-python && pytest                      # 130 backend tests
-cd frontend && npm test                          # 40 frontend tests
+cd backend-python && pytest                      # 227 backend tests
+cd frontend && npm test                          # 50 frontend tests
 cd frontend && npm run build                     # production build
 cd backend-python && python -m tests.eval.run_evals   # 80-case agent benchmark
 ```

@@ -2,11 +2,16 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir fastapi uvicorn[standard] sqlalchemy[asyncio] asyncpg alembic pydantic pydantic-settings langchain langchain-openai langgraph httpx python-socketio pyjwt bcrypt google-api-python-client google-auth-oauthlib email-validator greenlet
-
 COPY . .
+RUN pip install --no-cache-dir . \
+    && useradd --create-home --uid 1000 appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
 
 EXPOSE 5000
 
-CMD ["uvicorn", "app.main:asgi_app", "--host", "0.0.0.0", "--port", "5000"]
+# --proxy-headers trusts X-Forwarded-For/Proto from FORWARDED_ALLOW_IPS
+# (default: 127.0.0.1) — needed for correct rate-limit client IPs and
+# OAuth redirects behind a reverse proxy.
+CMD ["uvicorn", "app.main:asgi_app", "--host", "0.0.0.0", "--port", "5000", "--proxy-headers"]

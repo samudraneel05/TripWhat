@@ -2,9 +2,9 @@ name: Test
 
 on:
   push:
-    branches: [modernization, master]
+    branches: [main]
   pull_request:
-    branches: [modernization, master]
+    branches: [main]
 
 jobs:
   backend-test:
@@ -29,7 +29,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version-file: '.nvmrc'
+          node-version-file: 'frontend/.nvmrc'
       - run: npm install
+      - run: npm run lint
+      - run: npx tsc --noEmit -p tsconfig.json
       - run: npm run build
       - run: npx vitest run

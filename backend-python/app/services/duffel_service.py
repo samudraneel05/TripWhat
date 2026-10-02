@@ -7,7 +7,6 @@ Docs: https://duffel.com/docs/api/v2
 import httpx
 
 from app.config import settings
-from app.utils.logger import logger
 
 BASE = "https://api.duffel.com/air"
 

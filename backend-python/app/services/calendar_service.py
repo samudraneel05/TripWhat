@@ -12,7 +12,6 @@ from googleapiclient.discovery import build
 
 from app.config import settings
 from app.services import google_oauth
-from app.utils.logger import logger
 
 CALENDAR_SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
