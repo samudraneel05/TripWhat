@@ -41,6 +41,7 @@ export function AuthProvider({ children }) {
         console.log("[AUTH] User data received:", data);
         // Backend returns { user: { id, name, email } }
         setUser(data.user);
+        return data.user;
       } else {
         console.log(
           "[AUTH] Token validation failed with status:",
@@ -58,6 +59,7 @@ export function AuthProvider({ children }) {
     } finally {
       setLoading(false);
     }
+    return null;
   };
 
   const login = async (email, password) => {
@@ -129,6 +131,15 @@ export function AuthProvider({ children }) {
     setUser(null);
   };
 
+  // For pages that already hold a token (Google OAuth callback). Stores it
+  // and fetches the user so ProtectedRoute sees a logged-in session — the
+  // mount-time token check in the effect above races with children that
+  // store the token in their own effects, so we do it explicitly here.
+  const loginWithToken = async (token) => {
+    localStorage.setItem("tripwhat_token", token);
+    return await fetchUser();
+  };
+
   const updateUser = (updatedUserData) => {
     setUser(prev => ({
       ...prev,
@@ -142,6 +153,7 @@ export function AuthProvider({ children }) {
     signup,
     logout,
     updateUser,
+    loginWithToken,
     loading,
     isAuthenticated: !!user,
   };
