@@ -2,6 +2,9 @@
 
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
+
+from app.config import settings
 
 
 @tool
@@ -78,7 +81,43 @@ async def book_flight(
     """
     from app.services import duffel_service
 
+    if settings.duffel_access_token.startswith("duffel_live") and not settings.allow_live_bookings:
+        return ("Live flight bookings are disabled on this server (ALLOW_LIVE_BOOKINGS is false). "
+                "No booking was made.")
+
     user_id = (config.get("configurable") or {}).get("user_id") if config else None
+    try:
+        offer = await duffel_service.get_offer(offer_id)
+        first_slice = (offer.get("slices") or [{}])[0]
+        origin = (first_slice.get("origin") or {}).get("iata_code", "?")
+        destination = (first_slice.get("destination") or {}).get("iata_code", "?")
+        first_segment = (first_slice.get("segments") or [{}])[0]
+        date = (first_segment.get("departing_at") or "")[:10]
+        airline = (offer.get("owner") or {}).get("name", "Unknown airline")
+        price = f"{offer.get('total_currency')} {offer.get('total_amount')}"
+    except ValueError:
+        return "Flight booking isn't configured — DUFFEL_ACCESS_TOKEN is missing."
+    except Exception as e:
+        return f"Booking failed: {e}"
+
+    # Suspend until the user explicitly confirms; chat_stream renders this
+    # payload as a question_card, and the next message resumes with the answer.
+    answer = interrupt({
+        "question": (
+            f"Confirm booking: {airline} {origin}->{destination} on {date} "
+            f"for {price} ({passenger_given_name} {passenger_family_name})?"
+        ),
+        "options": [
+            {"label": "Confirm booking", "value": "confirm_booking"},
+            {"label": "Cancel", "value": "cancel_booking"},
+        ],
+        "allowCustom": False,
+        "allowMultiSelect": False,
+        "placeholder": "Type something else...",
+    })
+    if answer != "confirm_booking":
+        return "Booking cancelled by user."
+
     try:
         order = await duffel_service.create_order(
             offer_id,

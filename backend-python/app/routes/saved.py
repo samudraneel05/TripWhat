@@ -5,13 +5,14 @@ import asyncio
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.user import User
 from app.models.saved_item import SavedItem
+from app.models.trip import Trip
 from app.deps import get_current_user
 from app.utils.logger import logger
 
@@ -21,7 +22,7 @@ router = APIRouter(prefix="/api/saved", tags=["saved"])
 
 class SaveItemRequest(BaseModel):
     itemType: str  # hotel | flight | place | restaurant
-    name: str
+    name: str = Field(max_length=300)
     data: dict | None = None
     tripId: int | None = None
 
@@ -69,6 +70,12 @@ async def save_item(
 ):
     if req.itemType not in {"hotel", "flight", "place", "restaurant"}:
         raise HTTPException(status_code=400, detail="Invalid itemType")
+    if req.tripId is not None:
+        owned = await db.execute(
+            select(Trip.id).where(Trip.id == req.tripId, Trip.user_id == user.id)
+        )
+        if owned.first() is None:
+            raise HTTPException(status_code=404, detail="Trip not found")
     item = SavedItem(
         user_id=user.id,
         trip_id=req.tripId,

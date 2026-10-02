@@ -15,6 +15,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(200))
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True)
     password: Mapped[str] = mapped_column(String(255))
+    google_sub: Mapped[str | None] = mapped_column(String(64), unique=True, index=True, nullable=True)
     bio: Mapped[str | None] = mapped_column(String(500), nullable=True)
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     preferences: Mapped[dict | None] = mapped_column(PortableJSON, nullable=True, default=dict)

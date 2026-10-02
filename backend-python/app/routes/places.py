@@ -1,7 +1,8 @@
 """Places routes — search, autocomplete, and details."""
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from app.deps import get_current_user
 from app.services.places_service import places_service
 from app.services.google_places import google_places
 from app.utils.logger import logger
@@ -10,7 +11,7 @@ router = APIRouter()
 
 
 @router.get("/search")
-async def search_places(query: str = Query(...), limit: int = 10):
+async def search_places(query: str = Query(...), limit: int = 10, _user=Depends(get_current_user)):
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="Query parameter is required")
     places = await places_service.search_places(query.strip(), limit)
@@ -18,7 +19,7 @@ async def search_places(query: str = Query(...), limit: int = 10):
 
 
 @router.get("/autocomplete")
-async def autocomplete(query: str = Query(...), limit: int = 8):
+async def autocomplete(query: str = Query(...), limit: int = 8, _user=Depends(get_current_user)):
     if not query or not query.strip():
         raise HTTPException(status_code=400, detail="Query parameter is required")
     suggestions = await places_service.get_autocomplete(query.strip(), limit)
@@ -26,7 +27,7 @@ async def autocomplete(query: str = Query(...), limit: int = 8):
 
 
 @router.get("/details")
-async def get_place_details(placeId: str = Query(...)):
+async def get_place_details(placeId: str = Query(...), _user=Depends(get_current_user)):
     """Get detailed place information including photos, reviews, hours, contact info,
     editorial summary, business status, and nearby alternates."""
     if not placeId:

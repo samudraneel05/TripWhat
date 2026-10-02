@@ -3,13 +3,17 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import jwt
 import socketio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from sqlalchemy import select
 
 from app.config import settings
-from app.database import init_db
+from app.database import async_session, init_db
+from app.deps import user_id_from_token
+from app.models import Conversation
 from app.utils.logger import logger
 
 # --- Socket.IO server (async mode, ASGI) ---
@@ -20,8 +24,18 @@ sio = socketio.AsyncServer(
 
 
 @sio.event
-async def connect(sid, environ):
-    logger.info(f"Client connected: {sid}")
+async def connect(sid, environ, auth=None):
+    token = auth.get("token") if isinstance(auth, dict) else None
+    try:
+        user_id = user_id_from_token(token) if token else None
+    except jwt.InvalidTokenError:
+        user_id = None
+    if user_id is None:
+        logger.info(f"Socket {sid} refused: unauthorized")
+        raise socketio.exceptions.ConnectionRefusedError("unauthorized")
+    await sio.save_session(sid, {"user_id": user_id})
+    await sio.enter_room(sid, f"user:{user_id}")
+    logger.info(f"Client connected: {sid} (user {user_id})")
 
 
 @sio.event
@@ -31,6 +45,16 @@ async def disconnect(sid):
 
 @sio.on("join:conversation")
 async def join_conversation(sid, conversation_id):
+    session = await sio.get_session(sid)
+    user_id = session.get("user_id") if session else None
+    async with async_session() as db:
+        result = await db.execute(
+            select(Conversation.user_id).where(Conversation.conversation_id == str(conversation_id))
+        )
+        row = result.first()
+    if user_id is None or row is None or row[0] != user_id:
+        logger.warning(f"Socket {sid} denied join for conversation: {conversation_id}")
+        return
     await sio.enter_room(sid, conversation_id)
     logger.info(f"Socket {sid} joined conversation: {conversation_id}")
 
@@ -131,6 +155,34 @@ app.include_router(image_proxy_router, tags=["image-proxy"])
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready():
+    """Dependency-aware readiness: fails when Postgres or Redis are down."""
+    from sqlalchemy import text
+    from app.database import async_session as session_factory
+    from app.services.stream_buffer import stream_buffer
+
+    checks: dict[str, bool] = {}
+    try:
+        async with session_factory() as db:
+            await db.execute(text("SELECT 1"))
+        checks["postgres"] = True
+    except Exception:
+        checks["postgres"] = False
+    try:
+        r = await stream_buffer._get_redis()
+        await r.ping()
+        checks["redis"] = True
+    except Exception as e:
+        logger.warning(f"[READY] redis check failed: {e}")
+        checks["redis"] = False
+
+    if all(checks.values()):
+        return {"status": "ready", **checks}
+    from fastapi.responses import JSONResponse
+    return JSONResponse(status_code=503, content={"status": "not_ready", **checks})
 
 
 @app.get("/api")

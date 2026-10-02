@@ -1,4 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { useTripStore } from "../stores/tripStore";
 
 const AuthContext = createContext(null);
 
@@ -77,7 +78,9 @@ export function AuthProvider({ children }) {
     if (!response.ok) {
       const error = await response.json();
       console.error("[AUTH] Login failed:", error);
-      throw new Error(error.message || "Login failed");
+      throw new Error(
+        typeof error.detail === "string" ? error.detail : error.message || "Login failed"
+      );
     }
 
     const { token, user } = await response.json();
@@ -109,7 +112,9 @@ export function AuthProvider({ children }) {
 
     if (!response.ok) {
       const error = await response.json();
-      throw new Error(error.message || "Signup failed");
+      throw new Error(
+        typeof error.detail === "string" ? error.detail : error.message || "Signup failed"
+      );
     }
 
     const { token, user } = await response.json();
@@ -119,6 +124,7 @@ export function AuthProvider({ children }) {
   };
 
   const logout = () => {
+    useTripStore.getState().disconnectSocket();
     localStorage.removeItem("tripwhat_token");
     setUser(null);
   };

@@ -1,7 +1,11 @@
 """Image proxy route — caches image blobs in DB for stable, fast serving."""
 
+import asyncio
 import hashlib
+import ipaddress
+import socket
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 from fastapi import APIRouter, Query, Response, HTTPException
@@ -16,7 +20,60 @@ router = APIRouter()
 # Cap TTL cleanup to run at most once per minute
 _last_cleanup: datetime | None = None
 CLEANUP_INTERVAL = timedelta(seconds=60)
-MAX_IMAGE_SIZE = 5 * 1024 * 1024  # 5 MB
+MAX_IMAGE_SIZE = 2 * 1024 * 1024  # 2 MB
+MAX_REDIRECTS = 3
+ALLOWED_HOST_SUFFIXES = (
+    "googleusercontent.com",
+    "ggpht.com",
+    "googleapis.com",
+    "gstatic.com",
+    "serpapi.com",
+    "images.unsplash.com",
+    "upload.wikimedia.org",
+)
+RESPONSE_HEADERS = {
+    "Cache-Control": "public, max-age=31536000, immutable",
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'",
+}
+
+
+def _host_allowed(host: str) -> bool:
+    host = host.lower().rstrip(".")
+    return any(host == s or host.endswith("." + s) for s in ALLOWED_HOST_SUFFIXES)
+
+
+async def _validate_url(url: str) -> None:
+    """Raise 400 unless the URL is https, allowlisted and resolves only to public IPs."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        port = parts.port or 443
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid url parameter")
+    if parts.scheme != "https" or not host or not _host_allowed(host):
+        raise HTTPException(status_code=400, detail="URL not allowed")
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError:
+        raise HTTPException(status_code=400, detail="URL not allowed")
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if (ip.is_private or ip.is_loopback or ip.is_link_local
+                or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+            raise HTTPException(status_code=400, detail="URL not allowed")
+
+
+async def _fetch_image(url: str) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=False) as client:
+        for _ in range(MAX_REDIRECTS + 1):
+            await _validate_url(url)
+            resp = await client.get(url)
+            if resp.is_redirect and resp.headers.get("location"):
+                url = urljoin(url, resp.headers["location"])
+                continue
+            return resp
+    raise HTTPException(status_code=400, detail="Too many redirects")
 
 
 async def _cleanup_expired():
@@ -45,6 +102,7 @@ async def proxy_image(url: str = Query(..., description="Full image URL to proxy
     """
     if not url or not url.startswith("http"):
         raise HTTPException(status_code=400, detail="Invalid url parameter")
+    await _validate_url(url)
 
     url_hash = hashlib.sha256(url.encode()).hexdigest()[:32]
 
@@ -68,42 +126,37 @@ async def proxy_image(url: str = Query(..., description="Full image URL to proxy
             return Response(
                 content=row.blob,
                 media_type=row.content_type,
-                headers={"Cache-Control": "public, max-age=31536000, immutable"},
+                headers=RESPONSE_HEADERS,
             )
 
     # Cache miss — fetch from origin
     try:
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            resp = await client.get(url)
-            if resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"Origin returned {resp.status_code}")
+        resp = await _fetch_image(url)
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=f"Origin returned {resp.status_code}")
 
-            blob = resp.content
-            if len(blob) > MAX_IMAGE_SIZE:
-                # Too big to cache — serve directly without storing
-                return Response(
-                    content=blob,
-                    media_type=resp.headers.get("content-type", "image/jpeg"),
-                    headers={"Cache-Control": "public, max-age=31536000, immutable"},
-                )
+        content_type = resp.headers.get("content-type", "")
+        if not content_type.lower().startswith("image/"):
+            raise HTTPException(status_code=415, detail="Origin did not return an image")
 
-            content_type = resp.headers.get("content-type", "image/jpeg")
+        blob = resp.content
+        if len(blob) > MAX_IMAGE_SIZE:
+            raise HTTPException(status_code=413, detail="Image too large")
 
-            # Store in DB
-            async with async_session() as db:
-                db.add(ImageCache(
-                    url_hash=url_hash,
-                    blob=blob,
-                    content_type=content_type,
-                    size_bytes=len(blob),
-                ))
-                await db.commit()
+        async with async_session() as db:
+            db.add(ImageCache(
+                url_hash=url_hash,
+                blob=blob,
+                content_type=content_type,
+                size_bytes=len(blob),
+            ))
+            await db.commit()
 
-            return Response(
-                content=blob,
-                media_type=content_type,
-                headers={"Cache-Control": "public, max-age=31536000, immutable"},
-            )
+        return Response(
+            content=blob,
+            media_type=content_type,
+            headers=RESPONSE_HEADERS,
+        )
 
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Origin timed out")

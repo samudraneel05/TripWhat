@@ -8,6 +8,31 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.database import Base, get_db
 from app.models import *  # noqa: F401,F403
+from app.services import rate_limit, run_registry
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_rate_limit(monkeypatch):
+    async def no_redis():
+        raise ConnectionError("redis disabled in tests")
+
+    monkeypatch.setattr(rate_limit, "_redis", no_redis)
+    rate_limit._memory.clear()
+    yield
+    rate_limit._memory.clear()
+
+
+@pytest.fixture(autouse=True)
+def _in_memory_run_registry(monkeypatch):
+    async def no_redis():
+        raise ConnectionError("redis disabled in tests")
+
+    monkeypatch.setattr(run_registry, "_redis", no_redis)
+    run_registry._mem_conv.clear()
+    run_registry._mem_user.clear()
+    yield
+    run_registry._mem_conv.clear()
+    run_registry._mem_user.clear()
 
 
 @pytest_asyncio.fixture
@@ -45,3 +70,13 @@ async def client(test_engine):
         yield ac
 
     app.dependency_overrides.clear()
+
+
+@pytest_asyncio.fixture
+async def auth_headers(client):
+    resp = await client.post("/api/auth/register", json={
+        "name": "Auth User",
+        "email": "authuser@example.com",
+        "password": "password123",
+    })
+    return {"Authorization": f"Bearer {resp.json()['token']}"}

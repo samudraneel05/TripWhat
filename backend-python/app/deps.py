@@ -32,3 +32,13 @@ async def get_current_user(
         return user
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def user_id_from_token(token: str) -> int:
+    """Decode a JWT and return its user id; raises jwt.InvalidTokenError if unusable."""
+    payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    user_id = payload.get("sub") or payload.get("userId")
+    try:
+        return int(user_id)
+    except (TypeError, ValueError):
+        raise jwt.InvalidTokenError("Token has no user id")

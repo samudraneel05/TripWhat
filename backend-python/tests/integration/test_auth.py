@@ -40,7 +40,7 @@ async def test_login_invalid(client):
         "email": "nonexistent@example.com",
         "password": "wrong",
     })
-    assert resp.status_code == 400
+    assert resp.status_code == 401
 
 
 @pytest.mark.asyncio

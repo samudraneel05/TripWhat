@@ -4,15 +4,18 @@ import asyncio
 import jwt
 import secrets
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import User
+from app.services import rate_limit
 from app.schemas.auth import (
     RegisterRequest, LoginRequest, AuthResponse,
     UserResponse, UpdateProfileRequest,
@@ -31,12 +34,32 @@ def _verify_password(password: str, hashed: str) -> bool:
     return bcrypt.checkpw(password.encode("utf-8")[:72], hashed.encode("utf-8"))
 
 
+def _is_legacy_google_account(user: User, raw_email: str, normalized_email: str) -> bool:
+    """Accounts created by the old Google flow used password = hash(email + jwt_secret)."""
+    return any(
+        _verify_password(email + settings.jwt_secret, user.password)
+        for email in {raw_email, normalized_email}
+    )
+
+
 def _create_token(user_id: int) -> str:
     payload = {
         "sub": str(user_id),
         "exp": datetime.now(timezone.utc) + timedelta(days=settings.jwt_expires_in_days),
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+async def _throttle(key: str, limit: int) -> None:
+    if not await rate_limit.hit(key, limit, 60):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many attempts. Please wait a minute and try again.",
+        )
 
 
 def _user_response(user: User) -> UserResponse:
@@ -51,8 +74,9 @@ def _user_response(user: User) -> UserResponse:
 
 
 @router.post("/register", response_model=AuthResponse)
-async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    existing = await db.execute(select(User).where(User.email == req.email))
+async def register(req: RegisterRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await _throttle(f"register:ip:{_client_ip(request)}", 5)
+    existing = await db.execute(select(User).where(func.lower(User.email) == req.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="User already exists")
 
@@ -60,7 +84,7 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
         name=req.name,
         email=req.email,
         password=_hash_password(req.password),
-        preferences=req.preferences or {},
+        preferences=req.preferences.model_dump(exclude_unset=True) if req.preferences else {},
     )
     db.add(user)
     await db.commit()
@@ -71,11 +95,13 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login", response_model=AuthResponse)
-async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(User.email == req.email))
+async def login(req: LoginRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    await _throttle(f"login:ip:{_client_ip(request)}", 10)
+    await _throttle(f"login:email:{req.email}", 10)
+    result = await db.execute(select(User).where(func.lower(User.email) == req.email))
     user = result.scalar_one_or_none()
     if not user or not _verify_password(req.password, user.password):
-        raise HTTPException(status_code=400, detail="Invalid credentials")
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     token = _create_token(user.id)
     return AuthResponse(token=token, user=_user_response(user))
@@ -100,7 +126,7 @@ async def update_profile(
         user.avatar_url = req.avatar_url
     if req.preferences is not None:
         current = user.preferences or {}
-        current.update(req.preferences)
+        current.update(req.preferences.model_dump(exclude_unset=True))
         user.preferences = current
 
     await db.commit()
@@ -169,12 +195,15 @@ async def google_auth_start(redirect: str = Query("/trips")):
 
 @router.get("/google/callback")
 async def google_auth_callback(
+    request: Request,
     code: str = Query(...),
     state: str = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
     """Handle the Google OAuth callback — create or log in the user."""
     from google_auth_oauthlib.flow import Flow
+
+    await _throttle(f"google:ip:{_client_ip(request)}", 20)
 
     frontend_base = settings.frontend_url.rstrip("/")
     oauth_error = RedirectResponse(
@@ -219,27 +248,47 @@ async def google_auth_callback(
     except jwt.InvalidTokenError:
         claims = {}
 
-    google_email = claims.get("email", "")
+    raw_google_email = claims.get("email", "")
+    google_email = raw_google_email.strip().lower()
+    google_sub = claims.get("sub")
     google_name = claims.get("name", google_email.split("@")[0] if google_email else "Traveler")
     google_picture = claims.get("picture")
 
-    if not google_email:
-        logger.warning("Google OAuth callback: ID token missing email claim")
+    if not google_email or not google_sub:
+        logger.warning("Google OAuth callback: ID token missing email or sub claim")
         return oauth_error
 
-    # Find or create user
-    result = await db.execute(select(User).where(User.email == google_email))
+    if claims.get("email_verified") is not True:
+        return RedirectResponse(
+            url=f"{frontend_base}/login?error=google_unverified", status_code=302
+        )
+
+    result = await db.execute(select(User).where(User.google_sub == google_sub))
     user = result.scalar_one_or_none()
 
     if not user:
-        user = User(
-            name=google_name,
-            email=google_email,
-            password=_hash_password(google_email + settings.jwt_secret),  # random password
-            avatar_url=google_picture,
-            preferences={},
-        )
-        db.add(user)
+        result = await db.execute(select(User).where(func.lower(User.email) == google_email))
+        existing = result.scalar_one_or_none()
+        if existing and (existing.google_sub is not None or not _is_legacy_google_account(
+            existing, raw_google_email, google_email
+        )):
+            return RedirectResponse(
+                url=f"{frontend_base}/login?error=google_account_exists", status_code=302
+            )
+        if existing:
+            existing.google_sub = google_sub
+            existing.password = _hash_password(secrets.token_urlsafe(32))
+            user = existing
+        else:
+            user = User(
+                name=google_name,
+                email=google_email,
+                password=_hash_password(secrets.token_urlsafe(32)),
+                google_sub=google_sub,
+                avatar_url=google_picture,
+                preferences={},
+            )
+            db.add(user)
         await db.commit()
         await db.refresh(user)
     elif google_picture and not user.avatar_url:
@@ -248,9 +297,9 @@ async def google_auth_callback(
 
     token = _create_token(user.id)
 
-    # Redirect to frontend with token
-    redirect_clean = redirect.lstrip("/")
+    # Token travels in the URL fragment so it never reaches server logs or Referer headers
+    redirect_clean = quote(redirect.lstrip("/"), safe="/")
     return RedirectResponse(
-        url=f"{frontend_base}/auth/google/success?token={token}&redirect={redirect_clean}",
+        url=f"{frontend_base}/auth/google/success#token={token}&redirect={redirect_clean}",
         status_code=302,
     )

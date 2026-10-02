@@ -5,6 +5,12 @@ import { useAuth } from "../contexts/AuthContext";
 import { AuthImagePanel } from "../components/landing/AuthImagePanel";
 import "./AuthPage.css";
 
+const GOOGLE_ERRORS = {
+  google_signin_failed: "Google sign-in failed. Please try again.",
+  google_unverified: "Google couldn't verify this email.",
+  google_account_exists: "An account with this email already exists. Log in with your password.",
+};
+
 function GoogleIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -35,9 +41,8 @@ export default function LoginPage() {
   }, [navigate, isAuthenticated, loading, postAuthPath]);
 
   useEffect(() => {
-    if (searchParams.get("error") === "google_signin_failed") {
-      setError("Google sign-in failed. Please try again.");
-    }
+    const message = GOOGLE_ERRORS[searchParams.get("error")];
+    if (message) setError(message);
   }, [searchParams]);
 
   const handleChange = (e) => {
