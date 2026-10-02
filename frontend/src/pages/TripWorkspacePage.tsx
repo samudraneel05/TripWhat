@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams } from 'react-router-dom';
-import { MapPin, Plus, Check, X, ArrowRight } from 'lucide-react';
+import { MapPin, Plus, Check, X, ArrowRight, MessageSquare, Map } from 'lucide-react';
 import { ChatPanel } from '../components/Chat/ChatPanel';
 import { TripMap } from '../components/map/TripMap';
 import { PlaceDetailPanel } from '../components/PlaceDetailPanel';
@@ -17,16 +17,20 @@ export default function TripWorkspacePage() {
   const { id } = useParams<{ id: string }>();
 
   // Fresh instance per trip (keyed route in App.jsx) — clear chat + trip
-  // view state synchronously on first render so the previously viewed
-  // conversation/trip can't bleed into this one while fetchTrip loads.
-  const resetRef = useRef(false);
-  if (!resetRef.current) {
-    resetRef.current = true;
-    useChatStore.getState().reset();
-    useTripStore.setState({ tripState: null, pendingDiff: null, progressiveDays: null });
-  }
+  // view state on mount so the previously viewed conversation/trip can't
+  // bleed into this one while fetchTrip loads. Zustand mutations during
+  // render fire the "update while rendering" warning, so reset happens in
+  // a first-run effect and the render is gated on it below.
+  const [storesReady, setStoresReady] = useState(false);
+  useEffect(() => {
+    if (!storesReady) {
+      useChatStore.getState().reset();
+      useTripStore.setState({ tripState: null, pendingDiff: null, progressiveDays: null });
+      setStoresReady(true);
+    }
+  }, [storesReady]);
 
-  const { tripState, fetchTrip, connectSocket, disconnectSocket, setTripState, updateTrip, pendingDiff, acceptDiff, rejectDiff } = useTripStore();
+  const { tripState, fetchTrip, connectSocket, setTripState, updateTrip, pendingDiff, acceptDiff, rejectDiff } = useTripStore();
   const conversationId = useChatStore((s) => s.conversationId);
   const { activeTab, setActiveTab, cityFilter, setCityFilter } = useUIStore();
   const [tripLoading, setTripLoading] = useState(true);
@@ -35,6 +39,8 @@ export default function TripWorkspacePage() {
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
   const pendingSaveRef = useRef<any>(null);
+  // On phones the two panes can't fit side-by-side — toggle between them.
+  const [mobileView, setMobileView] = useState<'chat' | 'plan'>('plan');
 
   // Find a place in the itinerary by placeId to get its coordinates
   const findPlaceInItinerary = (itinerary: any, placeId: string): any | null => {
@@ -74,7 +80,6 @@ export default function TripWorkspacePage() {
       fetchTrip(id).catch((err) => setTripError(err?.message || 'Failed to load trip')).finally(() => setTripLoading(false));
     }
     connectSocket();
-    return () => { disconnectSocket(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
@@ -121,10 +126,14 @@ export default function TripWorkspacePage() {
   const itinerary = tripState?.itinerary;
   const tripTitle = cities.map((c) => c.name).join(' → ') || 'Untitled trip';
 
+  if (!storesReady) {
+    return <div className="h-[calc(100dvh-44px)] md:h-screen bg-[var(--bg)]" />;
+  }
+
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Chat panel - left 52% */}
-      <div className="w-[52%] shrink-0 border-r border-[var(--border)] relative">
+    <div className="flex flex-col md:flex-row h-[calc(100dvh-44px)] md:h-screen overflow-hidden">
+      {/* Chat panel — left 52% on desktop, full-screen toggle on mobile */}
+      <div className={`${mobileView === 'chat' ? 'flex' : 'hidden'} md:flex flex-1 min-h-0 md:flex-none md:w-[52%] shrink-0 border-r border-[var(--border)] relative flex-col`}>
         <ChatPanel
           title={tripTitle}
           tripState={tripState || undefined}
@@ -147,8 +156,8 @@ export default function TripWorkspacePage() {
         )}
       </div>
 
-      {/* Right panel - map + itinerary */}
-      <div className="flex-1 flex flex-col bg-[var(--bg)] min-w-0">
+      {/* Right panel - map + itinerary; on mobile toggled via bottom bar */}
+      <div className={`${mobileView === 'plan' ? 'flex' : 'hidden'} md:flex flex-1 flex-col bg-[var(--bg)] min-w-0 min-h-0`}>
         {tripError ? (
           <div className="flex-1 flex items-center justify-center">
             <p className="text-sm text-red-600">{tripError}</p>
@@ -227,6 +236,28 @@ export default function TripWorkspacePage() {
             </div>
           </>
         )}
+      </div>
+
+      {/* Mobile Chat / Plan switcher */}
+      <div className="md:hidden shrink-0 border-t border-[var(--border)] bg-[var(--surface)] flex">
+        <button
+          onClick={() => setMobileView('chat')}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors ${
+            mobileView === 'chat' ? 'text-[var(--ink)]' : 'text-[var(--muted)]'
+          }`}
+        >
+          <MessageSquare className="w-4 h-4" />
+          Chat
+        </button>
+        <button
+          onClick={() => setMobileView('plan')}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors ${
+            mobileView === 'plan' ? 'text-[var(--ink)]' : 'text-[var(--muted)]'
+          }`}
+        >
+          <Map className="w-4 h-4" />
+          Trip plan
+        </button>
       </div>
     </div>
   );

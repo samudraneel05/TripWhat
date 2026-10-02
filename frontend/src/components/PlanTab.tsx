@@ -177,16 +177,22 @@ export function PlanTab({
     );
   }
 
+  // Normalize dayNumber — saved/edited itineraries can ship days without it,
+  // which makes the selector and edit actions target the wrong day.
+  const days = itinerary.days.map((d: any, i: number) =>
+    d.dayNumber ? d : { ...d, dayNumber: i + 1 }
+  );
+
   const filteredDays = cityFilter
-    ? itinerary.days.filter((d: any) => d.location === cityFilter)
-    : itinerary.days;
+    ? days.filter((d: any) => d.location === cityFilter)
+    : days;
 
   // Day-by-day view
   if (planViewMode === 'day-by-day') {
-    const day = itinerary.days.find((d: any) => d.dayNumber === selectedDay) || itinerary.days[0];
-    const dayIdx = itinerary.days.indexOf(day);
+    const day = days.find((d: any) => d.dayNumber === selectedDay) || days[0];
+    const dayIdx = days.indexOf(day);
     const isFirstDay = dayIdx === 0;
-    const isLastDay = dayIdx === itinerary.days.length - 1;
+    const isLastDay = dayIdx === days.length - 1;
     const bestFlight = itinerary.flightOptions?.[0];
     const bestHotel = itinerary.hotelRecommendations?.[0];
 
@@ -214,7 +220,7 @@ export function PlanTab({
 
         {/* Day selector chips */}
         <div className="flex flex-wrap gap-1.5 mb-4">
-          {itinerary.days.map((d: any) => (
+          {days.map((d: any) => (
             <button
               key={d.dayNumber}
               onClick={() => setSelectedDay(d.dayNumber)}
@@ -334,7 +340,7 @@ export function PlanTab({
                       <ActivityMenu
                         activity={slot.activity}
                         day={day.dayNumber}
-                        totalDays={itinerary.days.length}
+                        totalDays={days.length}
                         slot={slot}
                         onRemove={(aid) => handleRemove(day.dayNumber, aid)}
                         onEditTime={(sid, st, et) => handleEditTime(day.dayNumber, sid, st, et)}
@@ -545,7 +551,7 @@ export function PlanTab({
                       <ActivityMenu
                         activity={slot.activity}
                         day={day.dayNumber}
-                        totalDays={itinerary.days.length}
+                        totalDays={days.length}
                         slot={slot}
                         onRemove={(aid) => handleRemove(day.dayNumber, aid)}
                         onEditTime={(sid, st, et) => handleEditTime(day.dayNumber, sid, st, et)}

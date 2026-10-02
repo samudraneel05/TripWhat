@@ -45,6 +45,7 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords }
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const markersRef = useRef<mapboxgl.Marker[]>([]);
   const lastDestRef = useRef<string | null>(null);
+  const lastBoundsSigRef = useRef<string>('');
   const [dayFilter, setDayFilter] = useState<number | null>(null); // null = all days
 
   useEffect(() => {
@@ -191,7 +192,15 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords }
       });
 
       if (hasMarkers) {
-        map.fitBounds(bounds, { padding: 50, maxZoom: 12 });
+        // Only refit the camera when the marker set actually changed —
+        // re-running fitBounds on every itinerary object churn was the
+        // "map keeps fading/jumping" bug.
+        const sig = bounds.isEmpty() ? ''
+          : `${bounds.getWest().toFixed(3)},${bounds.getSouth().toFixed(3)},${bounds.getEast().toFixed(3)},${bounds.getNorth().toFixed(3)}`;
+        if (sig && sig !== lastBoundsSigRef.current) {
+          lastBoundsSigRef.current = sig;
+          map.fitBounds(bounds, { padding: 50, maxZoom: 12 });
+        }
       }
     };
 

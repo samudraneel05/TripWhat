@@ -62,7 +62,7 @@ export default function Sidebar() {
 
   return (
     <aside
-      className={`${w} shrink-0 h-screen sticky top-0 border-r border-[var(--border)] bg-[var(--surface)] flex flex-col z-30`}
+      className={`${w} hidden md:flex shrink-0 h-screen sticky top-0 border-r border-[var(--border)] bg-[var(--surface)] flex-col z-30`}
       style={{ transition: 'width 200ms var(--ease-out)' }}
     >
       {/* Brand + collapse */}
@@ -281,5 +281,45 @@ export default function Sidebar() {
         )}
       </div>
     </aside>
+  );
+}
+
+// Compact top bar shown on phones, where the aside is hidden.
+export function MobileNav() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const navItems = [
+    { icon: Home, label: 'Trips', path: '/trips' },
+    { icon: MessagesSquare, label: 'Chats', path: '/chats' },
+    { icon: Bell, label: 'Notifications', path: '/notifications' },
+  ];
+  return (
+    <div className="md:hidden h-11 shrink-0 flex items-center gap-1 px-3 border-b border-[var(--border)] bg-[var(--surface)] sticky top-0 z-30">
+      <Link to="/trips" className="flex items-center gap-1.5 mr-auto">
+        <div className="flex items-center justify-center w-6 h-6 rounded-md bg-[var(--peach)]">
+          <Compass className="w-3.5 h-3.5 text-white" />
+        </div>
+        <span className="text-sm font-semibold text-[var(--ink)]">TripWhat</span>
+      </Link>
+      {navItems.map(({ icon: Icon, label, path }) => (
+        <Link
+          key={path}
+          to={path}
+          aria-label={label}
+          className={`p-2 rounded-md transition-colors ${
+            location.pathname === path ? 'text-[var(--ink)] bg-[var(--sage)]' : 'text-[var(--muted)]'
+          }`}
+        >
+          <Icon className="w-4 h-4" />
+        </Link>
+      ))}
+      <button
+        onClick={() => navigate('/new')}
+        aria-label="New trip"
+        className="p-2 rounded-md text-white bg-[var(--ink)] ml-1"
+      >
+        <Plus className="w-4 h-4" />
+      </button>
+    </div>
   );
 }

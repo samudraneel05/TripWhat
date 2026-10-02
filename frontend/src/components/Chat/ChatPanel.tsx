@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from 'react';
-import { ArrowUp, Sparkles, Mic, MoreHorizontal, Share2, Activity } from 'lucide-react';
+import { ArrowUp, Sparkles } from 'lucide-react';
 import { useChatStore, type ToolActivity } from '../../stores/chatStore';
 import { useTripStore } from '../../stores/tripStore';
 import { chatApi } from '../../lib/api';
@@ -24,12 +24,11 @@ interface ChatPanelProps {
 
 type ChatEntry =
   | { kind: 'user'; text: string }
-  | { kind: 'assistant'; text: string; widgets?: any[]; toolActivities?: ToolActivity[] }
+  | { kind: 'assistant'; text: string; widgets?: any[]; toolActivities?: ToolActivity[]; error?: boolean }
   | { kind: 'answered'; question: string; answerLabel: string };
 
 export function ChatPanel({
   title = 'New trip',
-  tripState,
   onItineraryBuilt,
   onTripStateUpdate,
   onSelectPlace,
@@ -57,6 +56,20 @@ export function ChatPanel({
   const [searchResults, setSearchResults] = useState<any>(null);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [hasStarted, setHasStarted] = useState(false);
+  const [showReconnecting, setShowReconnecting] = useState(false);
+  const socketConnected = useTripStore((s) => s.socketConnected);
+  const socketExists = useTripStore((s) => !!s.socket);
+
+  // Show a "Reconnecting…" banner only after a short outage — brief
+  // transport hiccups shouldn't flash UI at the user.
+  useEffect(() => {
+    if (!socketExists || socketConnected) {
+      setShowReconnecting(false);
+      return;
+    }
+    const t = setTimeout(() => setShowReconnecting(true), 2000);
+    return () => clearTimeout(t);
+  }, [socketConnected, socketExists]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const hasSentInitial = useRef(false);
@@ -132,6 +145,22 @@ export function ChatPanel({
   useEffect(() => {
     scrollRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatEntries, activeWidget, assistantText, isLoading, streamingText]);
+
+  // Long builds can go quiet between progress events — after 20s of no
+  // status change, tell the user we're still working rather than leaving a
+  // frozen "Thinking..." label.
+  const lastStatusChangeRef = useRef(Date.now());
+  useEffect(() => { lastStatusChangeRef.current = Date.now(); }, [agentStatus]);
+  useEffect(() => {
+    if (!isLoading) return;
+    const t = setInterval(() => {
+      if (Date.now() - lastStatusChangeRef.current > 20000) {
+        const cur = useChatStore.getState().agentStatus;
+        if (!cur || !cur.includes('Still working')) setAgentStatus('Still working on it…');
+      }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [isLoading, setAgentStatus]);
 
   // Keep a ref of conversationId so Socket.IO handlers always see the latest
   // value without needing to re-register on every change (avoids race condition
@@ -295,6 +324,7 @@ export function ChatPanel({
         text: data.message,
         widgets: entryWidgets,
         toolActivities: activitiesSnapshot,
+        error: !!data.error,
       }]);
 
       useChatStore.getState().addMessage({
@@ -304,6 +334,7 @@ export function ChatPanel({
         widgets: data.widgets,
         toolActivities: [...getToolActivities()],
         suggestions: data.suggestions || [],
+        ...(data.error ? { error: true } : {}),
       });
     }
 
@@ -394,16 +425,19 @@ export function ChatPanel({
         }, 0);
       }
     } catch (err: any) {
-      const busy = err.response?.status === 409;
+      const status = err.response?.status;
+      const busy = status === 409;
+      const detail = typeof err.response?.data?.detail === 'string' ? err.response.data.detail : null;
       setAssistantText(
         busy
           ? "Still working on your previous message — it'll be answered shortly."
-          : "I'm sorry, I couldn't process your request. Please try again."
+          : detail || "I'm sorry, I couldn't process your request. Please try again."
       );
       setActiveWidget(null);
       useChatStore.getState().settleToolActivities(true);
       // On 409 a run is still in flight — its agent:response will clear
-      // loading when it lands, so don't clear it here.
+      // loading when it lands, so don't clear it here. A 429 means nothing
+      // started, so clear it now.
       if (!busy) {
         setTimeout(() => {
           setLoading(false);
@@ -455,7 +489,8 @@ export function ChatPanel({
         }, 0);
       }
     } catch (err: any) {
-      setAssistantText("I'm sorry, I couldn't process your request. Please try again.");
+      const detail = typeof err.response?.data?.detail === 'string' ? err.response.data.detail : null;
+      setAssistantText(detail || "I'm sorry, I couldn't process your request. Please try again.");
       useChatStore.getState().settleToolActivities(true);
       setTimeout(() => {
         setLoading(false);
@@ -469,18 +504,12 @@ export function ChatPanel({
       {/* Slim header */}
       <div className="flex items-center justify-between px-4 h-12 border-b border-[var(--border)] shrink-0">
         <span className="text-sm font-medium text-[var(--ink)] truncate">{title}</span>
-        <div className="flex items-center gap-1">
-          <button className="p-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--sage)] transition-colors" title="Share">
-            <Share2 className="w-3.5 h-3.5" />
-          </button>
-          <button className="p-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--sage)] transition-colors" title="Activity">
-            <Activity className="w-3.5 h-3.5" />
-          </button>
-          <button className="p-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--sage)] transition-colors" title="More">
-            <MoreHorizontal className="w-3.5 h-3.5" />
-          </button>
-        </div>
       </div>
+      {showReconnecting && (
+        <div className="px-4 py-1.5 text-xs text-[var(--muted)] bg-[var(--bg)] border-b border-[var(--border)] shrink-0">
+          Reconnecting…
+        </div>
+      )}
 
       {/* Chat area */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
@@ -628,6 +657,23 @@ export function ChatPanel({
                     text={assistantText}
                     className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
                   />
+                  {(() => {
+                    const lastEntry = chatEntries[chatEntries.length - 1];
+                    if (lastEntry?.kind !== 'assistant' || !lastEntry.error) return null;
+                    const prevUser = [...chatEntries].reverse().find((e) => e.kind !== 'assistant');
+                    if (!prevUser) return null;
+                    const retryText = prevUser.kind === 'user' ? prevUser.text : prevUser.kind === 'answered' ? prevUser.answerLabel : '';
+                    if (!retryText) return null;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() => handleSend(retryText)}
+                        className="mt-1 text-xs font-medium text-[var(--ink)] border border-[var(--border)] rounded-full px-3 py-1 hover:bg-[var(--lavender)]"
+                      >
+                        Retry
+                      </button>
+                    );
+                  })()}
                   {/* Show collapsed tool activity bar from the last entry */}
                   {(() => {
                     const lastEntry = chatEntries[chatEntries.length - 1];
@@ -729,12 +775,11 @@ export function ChatPanel({
               disabled={isLoading}
             />
             <div className="flex items-center gap-1 shrink-0">
-              <button className="p-1.5 rounded-md text-[var(--muted)] hover:bg-[var(--sage)] transition-colors" title="Voice">
-                <Mic className="w-4 h-4" />
-              </button>
               <button
                 onClick={() => handleSend(input)}
                 disabled={!input.trim() || isLoading}
+                aria-label="Send message"
+                title="Send"
                 className="flex items-center justify-center w-7 h-7 rounded-lg bg-[var(--ink)] text-white disabled:opacity-30 hover:bg-[#292524] transition-colors"
               >
                 <ArrowUp className="w-4 h-4" />

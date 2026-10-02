@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useSearchParams, useParams, useNavigate } from 'react-router-dom';
-import { Compass, Plus } from 'lucide-react';
+import { Compass, Plus, MessageSquare, Map } from 'lucide-react';
 import { ChatPanel } from '../components/Chat/ChatPanel';
 import { TripMap } from '../components/map/TripMap';
 import { PlaceDetailPanel } from '../components/PlaceDetailPanel';
@@ -21,19 +21,23 @@ export default function NewTripPage() {
   const initialQuery = searchParams.get('q') || '';
 
   // Reset chat store on mount — this is a NEW trip, not a reopened one.
-  // Must run BEFORE any store selector below reads conversationId, or the
-  // first render captures the previous conversation's id and the URL-pin /
-  // socket effects bounce the user back to the old chat.
-  const resetRef = useRef(false);
-  if (!resetRef.current) {
-    resetRef.current = true;
-    useChatStore.getState().reset();
-  }
+  // Zustand mutations during render fire the "update while rendering" React
+  // warning, so we reset in a first-run effect and gate the render below.
+  const [storesReady, setStoresReady] = useState(false);
+  useEffect(() => {
+    if (!storesReady) {
+      useChatStore.getState().reset();
+      setStoresReady(true);
+    }
+  }, [storesReady]);
 
   const [localTripState, setLocalTripState] = useState<any>(null);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
-  const { createTrip, updateTrip, setTripState, connectSocket, disconnectSocket, fetchTrips } = useTripStore();
+  // On phones the two panes can't fit side-by-side — toggle between them.
+  const [mobileView, setMobileView] = useState<'chat' | 'plan'>('chat');
+  const sawItineraryRef = useRef(false);
+  const { createTrip, updateTrip, setTripState, connectSocket, fetchTrips } = useTripStore();
   const conversationId = useChatStore((s) => s.conversationId);
   const { activeTab, setActiveTab, cityFilter, setCityFilter } = useUIStore();
   const tripIdRef = useRef<number | null>(null);
@@ -47,8 +51,7 @@ export default function NewTripPage() {
 
   useEffect(() => {
     connectSocket();
-    return () => { disconnectSocket(); };
-  }, [connectSocket, disconnectSocket]);
+  }, [connectSocket]);
 
   useEffect(() => {
     if (conversationId) {
@@ -155,10 +158,22 @@ export default function NewTripPage() {
   const itinerary = localTripState?.itinerary || null;
   const cities = localTripState?.cities || [];
 
+  // When the first itinerary lands, surface it on mobile once.
+  useEffect(() => {
+    if (itinerary && !sawItineraryRef.current) {
+      sawItineraryRef.current = true;
+      setMobileView('plan');
+    }
+  }, [itinerary]);
+
+  if (!storesReady) {
+    return <div className="h-[calc(100dvh-44px)] md:h-screen bg-[var(--bg)]" />;
+  }
+
   return (
-    <div className="flex h-screen overflow-hidden">
-      {/* Chat panel - left 52% */}
-      <div className="w-[52%] shrink-0 border-r border-[var(--border)] relative">
+    <div className="flex flex-col md:flex-row h-[calc(100dvh-44px)] md:h-screen overflow-hidden">
+      {/* Chat panel — left 52% on desktop, full-screen toggle on mobile */}
+      <div className={`${mobileView === 'chat' ? 'flex' : 'hidden'} md:flex flex-1 min-h-0 md:flex-none md:w-[52%] shrink-0 border-r border-[var(--border)] relative flex-col`}>
         <ChatPanel
           title="New trip"
           initialMessage={routeConvId ? '' : initialQuery}
@@ -180,8 +195,8 @@ export default function NewTripPage() {
         )}
       </div>
 
-      {/* Right panel - map + workspace 48% */}
-      <div className="flex-1 flex flex-col bg-[var(--bg)] min-w-0">
+      {/* Right panel - map + workspace; on mobile toggled via bottom bar */}
+      <div className={`${mobileView === 'plan' ? 'flex' : 'hidden'} md:flex flex-1 flex-col bg-[var(--bg)] min-w-0 min-h-0`}>
         {/* Map - top 40% */}
         <div className="h-[40%] shrink-0 border-b border-[var(--border)] relative bg-[var(--sage)]">
           <TripMap itinerary={itinerary} destination={destination} />
@@ -244,6 +259,28 @@ export default function NewTripPage() {
             {activeTab === 'saved' && <SavedTab />}
           </div>
         </div>
+      </div>
+
+      {/* Mobile Chat / Plan switcher */}
+      <div className="md:hidden shrink-0 border-t border-[var(--border)] bg-[var(--surface)] flex">
+        <button
+          onClick={() => setMobileView('chat')}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors ${
+            mobileView === 'chat' ? 'text-[var(--ink)]' : 'text-[var(--muted)]'
+          }`}
+        >
+          <MessageSquare className="w-4 h-4" />
+          Chat
+        </button>
+        <button
+          onClick={() => setMobileView('plan')}
+          className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs font-medium transition-colors ${
+            mobileView === 'plan' ? 'text-[var(--ink)]' : 'text-[var(--muted)]'
+          }`}
+        >
+          <Map className="w-4 h-4" />
+          Trip plan
+        </button>
       </div>
     </div>
   );

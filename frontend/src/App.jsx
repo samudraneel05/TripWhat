@@ -8,18 +8,30 @@ import {
 } from "react-router-dom";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
+import { lazy, Suspense } from "react";
 import { AuthProvider, useAuth } from "./contexts/AuthContext.jsx";
 
 import AppLayout from "./components/AppLayout.tsx";
 import LandingPage from "./pages/LandingPage.jsx";
 import LoginPage from "./pages/LoginPage.jsx";
 import SignupPage from "./pages/SignupPage.jsx";
-import TripsPage from "./pages/TripsPage.tsx";
-import ChatsPage from "./pages/ChatsPage.tsx";
-import TripWorkspacePage from "./pages/TripWorkspacePage.tsx";
-import NewTripPage from "./pages/NewTripPage.tsx";
-import ProfilePage from "./pages/ProfilePage.jsx";
-import GoogleAuthSuccess from "./pages/GoogleAuthSuccess.jsx";
+
+// App pages are lazy-loaded — the workspace pulls in mapbox + the whole
+// itinerary UI, which shouldn't ship in the landing bundle.
+const TripsPage = lazy(() => import("./pages/TripsPage.tsx"));
+const ChatsPage = lazy(() => import("./pages/ChatsPage.tsx"));
+const TripWorkspacePage = lazy(() => import("./pages/TripWorkspacePage.tsx"));
+const NewTripPage = lazy(() => import("./pages/NewTripPage.tsx"));
+const ProfilePage = lazy(() => import("./pages/ProfilePage.jsx"));
+const GoogleAuthSuccess = lazy(() => import("./pages/GoogleAuthSuccess.jsx"));
+
+function PageFallback() {
+  return (
+    <div className="min-h-screen flex items-center justify-center text-[var(--muted)]">
+      <div className="animate-pulse text-sm">Loading…</div>
+    </div>
+  );
+}
 
 function ProtectedRoute({ children }) {
   const { user, loading } = useAuth();
@@ -58,6 +70,7 @@ function AppContent() {
 
   return (
     <div className="min-h-screen text-[var(--ink)]">
+      <Suspense fallback={<PageFallback />}>
       <Routes>
         <Route path="/" element={<LandingPage />} />
         <Route path="/login" element={<LoginPage />} />
@@ -137,6 +150,7 @@ function AppContent() {
           }
         />
       </Routes>
+      </Suspense>
       <ToastContainer
         position="top-right"
         autoClose={3000}
