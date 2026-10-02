@@ -30,7 +30,7 @@ from app.config import settings
 from app.agents.state import create_default_trip_state, resolve_build_cities
 from app.agents.state_schema import TravelAgentState
 from app.agents.tools.plan_tools import plan_trip, ask_question
-from app.agents.tools.search_tools import web_search
+from app.agents.tools.search_tools import web_search, make_search_tools
 from app.agents.tools.itinerary_tools import build_itinerary, edit_itinerary
 from app.agents.tools.calendar_tools import create_calendar_event
 from app.agents.tools.gmail_tools import get_email_bookings, import_email_booking
@@ -110,6 +110,65 @@ def _message_text(msg) -> str:
     return str(content)
 
 
+# --- Progressive tool disclosure --------------------------------------------
+# 16 tools ≈ 5.1k tokens of schema per model call (~4% of ctx) — plus the
+# bigger cost: a crowded catalog blurs lookalike tools together. Core tools
+# are always visible; situational tools appear when conversation signals them
+# (MCP's "progressive discovery" pattern, adapted for OpenAI via middleware).
+_CORE_TOOL_NAMES = {
+    "plan_trip", "ask_question", "web_search", "build_itinerary",
+    "edit_itinerary", "mcp_search_places", "remember_user_preference",
+    "search_tools",
+}
+_SITUATIONAL_TOOLS: list[tuple[re.Pattern, frozenset[str]]] = [
+    (re.compile(r"\b(e-?mail|gmail|inbox|booking\s+confirm|reservation|import)\b", re.I),
+     frozenset({"get_email_bookings", "import_email_booking"})),
+    (re.compile(r"\b(calendar|add\s+to\s+(?:my\s+)?calendar|\.ics)\b", re.I),
+     frozenset({"create_calendar_event"})),
+    (re.compile(r"\b(flights?|fly|flying|airfare|airline|plane\s+tickets?|book\s+a\s+flight)\b", re.I),
+     frozenset({"search_flights", "book_flight"})),
+    (re.compile(r"\b(weather|forecast|temperature|rain|climate|sunny|season)\b", re.I),
+     frozenset({"mcp_lookup_weather"})),
+    (re.compile(r"\b(route|drive|driving|transit|how\s+far|how\s+long|distance|directions|travel\s+time|get\s+there)\b", re.I),
+     frozenset({"mcp_compute_routes"})),
+    (re.compile(r"\b(nearby|near\s+me|close\s+to|walking\s+distance|around)\b", re.I),
+     frozenset({"mcp_find_nearby"})),
+    (re.compile(r"\b(coordinates?|place\s*id|exact\s+location|resolve)\b", re.I),
+     frozenset({"mcp_resolve_names"})),
+]
+
+
+def _active_tool_names(messages, all_tools) -> set[str]:
+    """Which tools the model should see this call.
+
+    Core tools always; situational tools when any user text this conversation
+    mentions their domain; plus anything the model has already called (later
+    turns like "import it" need siblings of tools it used), plus whatever a
+    prior search_tools call surfaced.
+    """
+    active = set(_CORE_TOOL_NAMES)
+    human_text = " ".join(
+        _message_text(m) for m in messages if isinstance(m, HumanMessage)
+    )
+    for rx, names in _SITUATIONAL_TOOLS:
+        if rx.search(human_text):
+            active |= names
+    for m in messages:
+        for tc in getattr(m, "tool_calls", None) or []:
+            name = tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None)
+            if name == "search_tools":
+                q = ""
+                args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+                if isinstance(args, dict):
+                    q = str(args.get("query", "")).lower()
+                for t in all_tools:
+                    if q and (q in t.name.lower() or q in (t.description or "").lower()):
+                        active.add(t.name)
+            elif name:
+                active.add(name)
+    return active
+
+
 def _is_interrupt_error(err) -> bool:
     """True when a tool-call error slot actually holds pending Interrupts.
 
@@ -177,6 +236,9 @@ class TravelAgent:
             mcp_lookup_weather,
             mcp_find_nearby,
         ]
+        # Meta-tool for progressive disclosure: lets the model discover hidden
+        # situational tools on demand (see _active_tool_names in middleware).
+        self._tools.append(make_search_tools(self._tools))
 
     def set_persistence(self, checkpointer, store) -> None:
         """Wire in persistent checkpointer/store (called once from app lifespan)."""
@@ -256,6 +318,15 @@ class TravelAgent:
                     overrides["tool_choice"] = "required"
                     overrides["model_settings"] = {"parallel_tool_calls": False}
                     logger.info("[MIDDLEWARE] Forcing tool_choice=required (onboarding, first step)")
+
+            # Progressive tool disclosure: model sees the core set plus tools
+            # the conversation signals it needs. Everything stays registered
+            # for execution — this only filters schema visibility.
+            active_names = _active_tool_names(request.messages, self._tools)
+            req_tools = getattr(request, "tools", None) or []
+            visible = [t for t in req_tools if t.name in active_names]
+            if 0 < len(visible) < len(req_tools):
+                overrides["tools"] = visible
 
             try:
                 return await handler(request.override(**overrides))

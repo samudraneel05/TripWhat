@@ -56,3 +56,37 @@ async def web_search(query: str) -> str:
     except Exception as e:
         logger.error(f"Web search failed: {e}")
         return f"Web search failed: {e}"
+
+
+def make_search_tools(all_tools: list):
+    """Build the `search_tools` meta-tool over the agent's full catalog.
+
+    Progressive disclosure: situational tools are hidden from the model
+    until the conversation signals them. If the model needs a capability it
+    can't see, it calls this tool — the middleware then un-hides matching
+    tools on the next model call.
+    """
+    catalog = all_tools  # captured by closure
+
+    @tool
+    async def search_tools(query: str) -> str:
+        """Discover which capabilities are available for a task. Call this when
+        the user's request needs something that isn't among your current tools
+        (e.g., email bookings, calendar, flights, weather, routes). The matched
+        tool becomes available immediately after this returns.
+
+        Args:
+            query: What you need to do (e.g., "import bookings from email")
+        """
+        words = {w for w in query.lower().split() if len(w) > 2}
+        matches = [
+            f"- {t.name}: {(t.description or '').split(chr(10))[0].strip()[:120]}"
+            for t in catalog
+            if t.name != "search_tools"
+            and words & set((t.name + " " + (t.description or "")).lower().split())
+        ]
+        if not matches:
+            return "No matching tools. Available capabilities are already loaded."
+        return "Matched tools (now available):\n" + "\n".join(matches[:8])
+
+    return search_tools

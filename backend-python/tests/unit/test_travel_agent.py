@@ -426,3 +426,73 @@ def test_interrupt_error_detection_covers_graph_interrupt():
     assert _is_interrupt_error(GraphInterrupt((intr,))) is True
     assert _is_interrupt_error(RuntimeError("boom")) is False
     assert _is_interrupt_error(None) is False
+
+
+# --- Progressive tool disclosure --------------------------------------------
+
+def test_active_tool_names_core_only_for_plain_planning(agent):
+    from langchain_core.messages import HumanMessage
+    from app.agents.travel_agent import _active_tool_names
+
+    names = _active_tool_names(
+        [HumanMessage(content="plan a 3-day trip to Paris")], agent._tools
+    )
+    assert {"plan_trip", "ask_question", "search_tools"} <= names
+    assert "get_email_bookings" not in names
+    assert "book_flight" not in names
+    assert "mcp_lookup_weather" not in names
+
+
+def test_active_tool_names_unlocks_domains_on_signal(agent):
+    from langchain_core.messages import HumanMessage
+    from app.agents.travel_agent import _active_tool_names
+
+    assert "get_email_bookings" in _active_tool_names(
+        [HumanMessage(content="check my email for hotel bookings")], agent._tools
+    )
+    assert "mcp_lookup_weather" in _active_tool_names(
+        [HumanMessage(content="what's the weather in Tokyo in November")], agent._tools
+    )
+    assert "search_flights" in _active_tool_names(
+        [HumanMessage(content="find flights from NYC")], agent._tools
+    )
+    assert "create_calendar_event" in _active_tool_names(
+        [HumanMessage(content="add this to my calendar")], agent._tools
+    )
+
+
+def test_search_tools_meta_tool_discovers_hidden_tools(agent):
+    from langchain_core.messages import AIMessage, HumanMessage
+    from app.agents.travel_agent import _active_tool_names
+
+    msgs = [
+        HumanMessage(content="import my bookings"),
+        AIMessage(content="", tool_calls=[
+            {"name": "search_tools", "args": {"query": "email bookings"}, "id": "1"}
+        ]),
+    ]
+    names = _active_tool_names(msgs, agent._tools)
+    assert "get_email_bookings" in names
+    assert "import_email_booking" in names
+
+
+def test_active_tool_names_keeps_previously_called_tools(agent):
+    from langchain_core.messages import AIMessage, HumanMessage
+    from app.agents.travel_agent import _active_tool_names
+
+    msgs = [
+        HumanMessage(content="check my email for bookings"),
+        AIMessage(content="", tool_calls=[
+            {"name": "get_email_bookings", "args": {}, "id": "1"}
+        ]),
+        HumanMessage(content="import it"),
+    ]
+    # "import it" alone wouldn't match email keywords — but the earlier call
+    # to get_email_bookings keeps it active.
+    assert "get_email_bookings" in _active_tool_names(msgs, agent._tools)
+
+
+async def test_search_tools_tool_returns_catalog_matches(agent):
+    search_tool = next(t for t in agent._tools if t.name == "search_tools")
+    out = await search_tool.ainvoke({"query": "email bookings"})
+    assert "get_email_bookings" in out
