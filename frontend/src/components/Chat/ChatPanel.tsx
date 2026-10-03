@@ -391,6 +391,16 @@ export function ChatPanel({
     }, 0);
   }, [lastResponse]);
 
+  // Queued sends from outside the panel (place-panel ask chips) go through
+  // the normal path — user bubble, loading state, tool bar, the works.
+  const pendingSend = useChatStore((s) => s.pendingSend);
+  useEffect(() => {
+    if (!pendingSend || isLoading) return;
+    useChatStore.getState().clearPendingSend();
+    handleSend(pendingSend);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingSend, isLoading]);
+
   const handleSend = async (text: string) => {
     if (!text.trim() || isLoading) return;
 

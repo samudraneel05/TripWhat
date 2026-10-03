@@ -493,9 +493,17 @@ export const useTripStore = create<TripStore>((set, get) => ({
 
       if (!events || events.length === 0) {
         if (!isActive) {
-          // Stream is done — clear any stale loading state
-          useChatStore.getState().setLoading(false);
-          useChatStore.getState().setAgentStatus(null);
+          // Only clear stale loading when no turn is expected in-flight:
+          // an empty/inactive replay can land while a just-sent message's
+          // run is still warming up (no buffered events yet). Clearing here
+          // used to kill the live tool bar/streaming for the whole turn.
+          const cs = useChatStore.getState();
+          const lastMsg = cs.messages[cs.messages.length - 1];
+          const turnInFlight = cs.isLoading && lastMsg?.role === 'user';
+          if (!turnInFlight) {
+            cs.setLoading(false);
+            cs.setAgentStatus(null);
+          }
         }
         return;
       }

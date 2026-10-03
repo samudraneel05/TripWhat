@@ -196,11 +196,10 @@ export default function NewTripPage() {
     }
   }, [localTripState]);
 
-  // Place panel "ask" chips — route through the chat send path so the answer
-  // lands in the conversation like any user message.
+  // Place panel "ask" chips — queue through the chat store so the message
+  // goes through the real send path (user bubble, loading, tool bar).
   const handleAskQuestion = useCallback((question: string) => {
-    const convId = useChatStore.getState().conversationId;
-    if (convId) chatApi.sendMessage({ message: question, conversationId: convId });
+    useChatStore.getState().queueMessage(question);
     if (window.matchMedia('(max-width: 767px)').matches) setMobileView('chat');
   }, []);
 
@@ -309,7 +308,7 @@ export default function NewTripPage() {
             placeId={selectedPlaceId}
             onClose={() => setSelectedPlaceId(null)}
             onSelectAlternate={(pid) => handleSelectPlace(pid)}
-            onAskQuestion={conversationId ? handleAskQuestion : undefined}
+            onAskQuestion={handleAskQuestion}
           />
         )}
       </div>

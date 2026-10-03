@@ -10,7 +10,7 @@ import { SavedTab } from '../components/SavedTab';
 import type { FlightOption } from '../components/FlightCard';
 import { useTripStore } from '../stores/tripStore';
 import { useChatStore, serializeMessages } from '../stores/chatStore';
-import { chatApi } from '../lib/api';
+
 import { useUIStore } from '../stores/uiStore';
 import { BookingsTab } from '../components/BookingsTab';
 
@@ -77,9 +77,10 @@ export default function TripWorkspacePage() {
     }
   };
 
+  // Place panel "ask" chips — queue through the chat store so the message
+  // goes through the real send path (user bubble, loading, tool bar).
   const handleAskQuestion = (question: string) => {
-    const convId = useChatStore.getState().conversationId;
-    if (convId) chatApi.sendMessage({ message: question, conversationId: convId });
+    useChatStore.getState().queueMessage(question);
     if (window.matchMedia('(max-width: 767px)').matches) setMobileView('chat');
   };
 

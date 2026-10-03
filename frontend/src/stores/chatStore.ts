@@ -72,6 +72,12 @@ interface ChatStore {
    *  answer (pending LangGraph interrupt). Set by fetchTrip from the
    *  conversation endpoint's `pendingWidget`; consumed by buildChatRestore. */
   pendingWidget: any | null;
+  /** A message queued by a component outside ChatPanel (e.g. place-panel
+   *  ask chips). ChatPanel consumes it through its normal send path so the
+   *  user bubble, loading state and tool bar all behave like a typed send. */
+  pendingSend: string | null;
+  queueMessage: (text: string) => void;
+  clearPendingSend: () => void;
 
   setConversationId: (id: string | null) => void;
   addMessage: (msg: ChatMessage) => void;
@@ -105,6 +111,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   lastResponse: null,
   lastWidget: null,
   pendingWidget: null,
+  pendingSend: null,
+
+  queueMessage: (text) => set({ pendingSend: text }),
+  clearPendingSend: () => set({ pendingSend: null }),
 
   setConversationId: (id) => set({ conversationId: id }),
 
