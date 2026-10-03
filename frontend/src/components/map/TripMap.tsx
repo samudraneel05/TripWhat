@@ -80,21 +80,29 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
 
     mapRef.current = map;
 
-    // Try to center on user's current location
+    // Center on the user's location when nothing else has framed the view.
+    // maximumAge lets the browser answer from a recent cached fix — without
+    // it every mount waits on a fresh GPS/network fix (the "map sits on the
+    // world view for seconds" finickiness). Skipped entirely when itinerary
+    // or search pins already own the camera.
     if (navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
-          if (mapRef.current) {
-            mapRef.current.flyTo({
-              center: [pos.coords.longitude, pos.coords.latitude],
-              zoom: 10,
-              speed: 1.0,
-              essential: true,
-            });
-          }
+          if (!mapRef.current) return;
+          const viewAlreadySet =
+            lastBoundsSigRef.current !== '' || lastSearchSigRef.current !== '';
+          if (viewAlreadySet) return;
+          mapRef.current.flyTo({
+            center: [pos.coords.longitude, pos.coords.latitude],
+            zoom: 10,
+            speed: 1.0,
+            essential: true,
+          });
         },
-        () => {},
-        { timeout: 5000 }
+        (err) => {
+          console.debug('[TripMap] geolocation unavailable, keeping world view:', err?.message);
+        },
+        { timeout: 5000, maximumAge: 300000 }
       );
     }
 
