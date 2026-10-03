@@ -45,10 +45,10 @@ describe('tripStore searchPlaces lifecycle', () => {
     expect(useTripStore.getState().searchPlacesConvId).toBeNull();
   });
 
-  it('clears pins when an itinerary arrives via setTripState', () => {
+  it('keeps pins when an itinerary arrives — explored and planned coexist', () => {
     useTripStore.getState().setSearchPlaces(PLACES, 'conv-1');
     useTripStore.getState().setTripState({ itinerary: { days: [] }, cities: [] } as any);
-    expect(useTripStore.getState().searchPlaces).toBeNull();
+    expect(useTripStore.getState().searchPlaces).toHaveLength(2);
   });
 
   it('keeps pins when a non-itinerary tripState arrives', () => {
@@ -59,14 +59,16 @@ describe('tripStore searchPlaces lifecycle', () => {
 });
 
 describe('SearchResults postcards', () => {
-  it('renders a numbered card per place matching map pin order', () => {
-    const { container } = render(
-      <SearchResults data={{ places: PLACES }} text="Here are sights" onSelectPlace={vi.fn()} />
+  it('reports card hover for map pin highlighting', () => {
+    const onHover = vi.fn();
+    render(
+      <SearchResults data={{ places: PLACES }} text="Here are sights" onHoverPlace={onHover} />
     );
-    const badges = container.querySelectorAll('button span.absolute');
-    expect(badges).toHaveLength(2);
-    expect(badges[0].textContent).toBe('1');
-    expect(badges[1].textContent).toBe('2');
+    const cards = screen.getAllByRole('button');
+    cards[0].dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+    expect(onHover).toHaveBeenCalledWith('p1');
+    cards[0].dispatchEvent(new MouseEvent('mouseout', { bubbles: true }));
+    expect(onHover).toHaveBeenLastCalledWith(null);
   });
 
   it('shows a letter placeholder when a place has no photo', () => {
