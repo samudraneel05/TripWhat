@@ -1,4 +1,3 @@
-import { MapPin } from 'lucide-react';
 import { ChatMarkdown, type PlaceRef } from '../../../lib/chatMarkdown';
 import { imgUrl } from '../../../lib/image';
 
@@ -48,14 +47,19 @@ export function SearchResults({ data, text, onSelectPlace }: SearchResultsProps)
             <button
               key={p.placeId || i}
               onClick={() => p.placeId && onSelectPlace?.(p.placeId)}
-              className="group shrink-0 w-[228px] snap-start text-left rounded-xl overflow-hidden border border-[var(--border)] bg-[var(--surface)] transition-shadow duration-200 hover:shadow-md active:scale-[0.98] active:transition-transform"
+              className={`group shrink-0 w-[188px] snap-start bg-white rounded-[3px]
+                          shadow-[0_2px_10px_rgba(0,0,0,0.14),0_1px_2px_rgba(0,0,0,0.08)]
+                          p-2 pb-0 transition-transform duration-200
+                          ${i % 2 === 0 ? '-rotate-[0.8deg]' : 'rotate-[0.8deg]'}
+                          hover:rotate-0 hover:-translate-y-0.5 hover:shadow-[0_6px_16px_rgba(0,0,0,0.16)]
+                          active:scale-[0.98]`}
             >
-              <div className="relative aspect-[3/2] bg-[var(--sage)]">
+              <div className="relative aspect-[4/3] overflow-hidden bg-[var(--sage)] rounded-[2px]">
                 {p.imageUrl ? (
                   <img
                     src={imgUrl(p.imageUrl)}
                     alt={p.name}
-                    className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-105"
+                    className="w-full h-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
                     loading="lazy"
                   />
                 ) : (
@@ -65,29 +69,15 @@ export function SearchResults({ data, text, onSelectPlace }: SearchResultsProps)
                     </span>
                   </div>
                 )}
-                {/* postcard caption: name over a soft gradient at the image foot */}
-                <div className="absolute inset-x-0 bottom-0 pt-8 pb-2 px-2.5 bg-gradient-to-t from-black/60 to-transparent">
-                  <p className="text-[13px] font-medium text-white leading-tight truncate [text-shadow:0_1px_2px_rgba(0,0,0,0.4)]">
-                    {p.name}
-                  </p>
-                </div>
                 <span className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-[#0D9488] text-white text-[10px] font-bold flex items-center justify-center shadow-sm">
                   {i + 1}
                 </span>
               </div>
-              <div className="px-2.5 py-1.5 flex items-center gap-1 text-[10px] text-[var(--muted)] leading-tight">
-                {p.rating != null && (
-                  <span className="text-[var(--ink)] shrink-0">★ {p.rating}</span>
-                )}
-                {p.rating != null && (p.type || p.address) && <span>·</span>}
-                {p.type && <span className="truncate">{p.type}</span>}
-                {p.type && p.address && <span>·</span>}
-                {p.address && (
-                  <span className="truncate flex items-center gap-0.5">
-                    <MapPin className="w-2.5 h-2.5 shrink-0" />
-                    {p.address}
-                  </span>
-                )}
+              {/* Polaroid bottom band — just the name, typewriter feel */}
+              <div className="pt-3 pb-2.5 text-center">
+                <span className="font-mono text-[12.5px] text-neutral-700 leading-tight line-clamp-1">
+                  {p.name}
+                </span>
               </div>
             </button>
           ))}
