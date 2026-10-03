@@ -58,7 +58,11 @@ export function ChatPanel({
   // Mirror search results into the trip store — the map renders them as
   // numbered pins and flies to the searched area.
   useEffect(() => {
-    useTripStore.getState().setSearchPlaces(searchResults?.places ?? null);
+    // Replace-on-arrival: only a non-empty new result set supersedes the
+    // current pins — non-search turns must NOT wipe the overlay.
+    if (searchResults?.places?.length) {
+      useTripStore.getState().setSearchPlaces(searchResults.places);
+    }
   }, [searchResults]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [hasStarted, setHasStarted] = useState(false);
@@ -733,7 +737,12 @@ export function ChatPanel({
               {/* Search results — shown after a search/recommendation turn */}
               {searchResults && !itinerarySummary && !activeWidget && !isLoading && !streamingText && (
                 <>
-                  <SearchResults data={searchResults} text={assistantText} onSelectPlace={onSelectPlace} />
+                  <SearchResults
+                    data={searchResults}
+                    text={assistantText}
+                    onSelectPlace={onSelectPlace}
+                    onHoverPlace={(id) => useTripStore.getState().setHoveredSearchPlace(id)}
+                  />
                   {(() => {
                     const lastEntry = chatEntries[chatEntries.length - 1];
                     if (lastEntry?.kind === 'assistant' && lastEntry.toolActivities && lastEntry.toolActivities.length > 0) {

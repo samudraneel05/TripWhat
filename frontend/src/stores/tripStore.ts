@@ -70,13 +70,18 @@ interface TripStore {
   lastEventIds: Record<string, string>;
   joinedConversationId: string | null;
   progressiveDays: { day: number; city: string; timeSlots: any[]; totalDays?: number }[] | null;
-  // Latest place-search results — drives the map's numbered pin overlay.
-  // Replaced by each new search; cleared on conversation switch or when an
-  // itinerary lands (itinerary markers take over). searchPlacesConvId records
-  // which conversation the pins belong to so restores aren't cleared by the
-  // first room join.
+  // Latest place-search results — drives the map's exploration-pin overlay.
+  // Replace-on-arrival: only a NEW search supersedes them — they persist
+  // across turns that produce no results and coexist with itinerary pins
+  // (explored vs planned are two layers). Cleared on conversation switch or
+  // the map's manual clear. searchPlacesConvId records which conversation
+  // the pins belong to so restores aren't cleared by the first room join.
   searchPlaces: SearchPlace[] | null;
   searchPlacesConvId: string | null;
+  /** placeId of the search pin highlighted by a hovered postcard (the
+   *  card-strip↔map correlation — replaces the old number badges). */
+  hoveredSearchPlaceId: string | null;
+  setHoveredSearchPlace: (placeId: string | null) => void;
 
   fetchTrips: () => Promise<void>;
   fetchTrip: (id: string) => Promise<void>;
@@ -110,6 +115,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
   progressiveDays: null,
   searchPlaces: null,
   searchPlacesConvId: null,
+  hoveredSearchPlaceId: null,
+  setHoveredSearchPlace: (placeId) => set({ hoveredSearchPlaceId: placeId }),
 
   fetchTrips: async () => {
     set({ loading: true, error: null });
@@ -251,11 +258,9 @@ export const useTripStore = create<TripStore>((set, get) => ({
   },
 
   setTripState: (state: TripState) => {
-    // An itinerary supersedes any explored-but-unsaved search pins.
-    set({
-      tripState: state,
-      ...(state?.itinerary ? { searchPlaces: null, searchPlacesConvId: null } : {}),
-    });
+    // Exploration pins coexist with the itinerary — adding to the plan
+    // morphs the pin in place, it doesn't clear the layer.
+    set({ tripState: state });
     // Background-prefetch all itinerary images through the proxy
     const urls = extractImageUrls(state);
     if (urls.length > 0) prefetchImages(urls);
@@ -625,10 +630,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
   },
 
   applyTripUpdate: (trip: Trip, changeSummary?: any[]) => {
-    set({
-      tripState: trip.tripState,
-      ...(trip.tripState?.itinerary ? { searchPlaces: null, searchPlacesConvId: null } : {}),
-    });
+    set({ tripState: trip.tripState });
     if (changeSummary) {
       useTripStore.getState();
     }
