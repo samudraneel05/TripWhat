@@ -188,8 +188,39 @@ export function PlaceDetailPanel({ placeId, onClose, onSelectAlternate, onAskQue
     }
   };
 
-  const handleAddToTrip = async () => {
+  // Where (if anywhere) this place already sits in the itinerary —
+  // matches by placeId, falls back to normalized name.
+  const existingInItinerary = (() => {
+    for (const day of tripState?.itinerary?.days || []) {
+      for (const slot of day.timeSlots || []) {
+        const acts = slot.activities || (slot.activity ? [slot.activity] : []);
+        for (const act of acts) {
+          const sameId = details?.placeId && act.placeId && act.placeId === details.placeId;
+          const sameName = act.name && details?.name &&
+            String(act.name).toLowerCase().trim() === details.name.toLowerCase().trim();
+          if (sameId || sameName) return { day: day.dayNumber, activityId: act.id };
+        }
+      }
+    }
+    return null;
+  })();
+
+  const [dayPickerOpen, setDayPickerOpen] = useState(false);
+  const dayPickerRef = useRef<HTMLDivElement>(null);
+
+  // Close the day picker on outside press.
+  useEffect(() => {
+    if (!dayPickerOpen) return;
+    const close = (e: MouseEvent) => {
+      if (!dayPickerRef.current?.contains(e.target as Node)) setDayPickerOpen(false);
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [dayPickerOpen]);
+
+  const handleAddToTrip = async (day: number) => {
     if (!details || !conversationId || !hasItinerary || addState === 'busy') return;
+    setDayPickerOpen(false);
     setAddState('busy');
     try {
       const city =
@@ -201,10 +232,26 @@ export function PlaceDetailPanel({ placeId, onClose, onSelectAlternate, onAskQue
       const res = await itineraryEditApi.add(conversationId, {
         place_name: details.name,
         city,
-        day: 1,
+        day,
       });
       if (res.data?.tripState) useTripStore.getState().applyTripUpdate(res.data.tripState);
       setAddState('done');
+    } catch {
+      setAddState('err');
+    }
+  };
+
+  const handleRemoveFromTrip = async () => {
+    if (!existingInItinerary?.activityId || !conversationId || addState === 'busy') return;
+    setDayPickerOpen(false);
+    setAddState('busy');
+    try {
+      const res = await itineraryEditApi.remove(conversationId, {
+        day: existingInItinerary.day,
+        activity_id: existingInItinerary.activityId,
+      });
+      if (res.data?.tripState) useTripStore.getState().applyTripUpdate(res.data.tripState);
+      setAddState('idle');
     } catch {
       setAddState('err');
     }
@@ -253,20 +300,68 @@ export function PlaceDetailPanel({ placeId, onClose, onSelectAlternate, onAskQue
             {saveState === 'done' ? 'Saved' : 'Save'}
           </button>
           {hasItinerary && (
-            <button
-              onClick={handleAddToTrip}
-              disabled={!details || addState === 'busy'}
-              className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-medium transition-colors disabled:opacity-50 ${
-                addState === 'done'
-                  ? 'bg-[var(--ink)] text-white'
-                  : addState === 'err'
-                    ? 'border border-red-300 text-red-500'
-                    : 'bg-[var(--ink)] text-white hover:opacity-90'
-              }`}
-            >
-              {addState === 'done' ? <Check className="w-3 h-3" /> : addState === 'busy' ? <Loader2 className="w-3 h-3 animate-spin" /> : <Plus className="w-3 h-3" />}
-              {addState === 'done' ? 'Added' : addState === 'err' ? 'Retry' : 'Add to trip'}
-            </button>
+            <div className="relative" ref={dayPickerRef}>
+              <button
+                onClick={() => setDayPickerOpen((o) => !o)}
+                disabled={!details || addState === 'busy'}
+                className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full text-[11px] font-medium transition-all duration-150 active:scale-[0.97] disabled:opacity-50 ${
+                  existingInItinerary
+                    ? 'bg-[var(--sage)] text-[var(--ink)]'
+                    : addState === 'done'
+                      ? 'bg-[var(--ink)] text-white'
+                      : addState === 'err'
+                        ? 'border border-red-300 text-red-500'
+                        : 'bg-[var(--ink)] text-white hover:opacity-90'
+                }`}
+              >
+                {addState === 'busy' ? <Loader2 className="w-3 h-3 animate-spin" />
+                  : existingInItinerary ? <Check className="w-3 h-3" />
+                  : addState === 'done' ? <Check className="w-3 h-3" />
+                  : <Plus className="w-3 h-3" />}
+                {existingInItinerary ? `Day ${existingInItinerary.day}`
+                  : addState === 'done' ? 'Added'
+                  : addState === 'err' ? 'Retry'
+                  : 'Add to trip'}
+              </button>
+              {/* Day picker / in-itinerary actions — scales in from the
+                  button, never a modal */}
+              {dayPickerOpen && (
+                <div
+                  className="absolute right-0 top-full mt-1.5 z-40 w-44 rounded-lg border border-[var(--border)] bg-[var(--surface)] shadow-lg py-1 origin-top-right"
+                  style={{ animation: 'daypick-in 150ms cubic-bezier(0.23,1,0.32,1)' }}
+                >
+                  {existingInItinerary ? (
+                    <>
+                      <div className="px-3 py-1.5 text-[10px] font-medium text-[var(--muted)]">
+                        On Day {existingInItinerary.day}
+                      </div>
+                      <button
+                        onClick={handleRemoveFromTrip}
+                        className="w-full text-left px-3 py-1.5 text-[11px] text-red-500 hover:bg-red-50 transition-colors"
+                      >
+                        Remove from trip
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="px-3 py-1.5 text-[10px] font-medium text-[var(--muted)]">
+                        Add to day
+                      </div>
+                      {(tripState?.itinerary?.days || []).map((d: any) => (
+                        <button
+                          key={d.dayNumber}
+                          onClick={() => handleAddToTrip(d.dayNumber)}
+                          className="w-full text-left px-3 py-1.5 text-[11px] text-[var(--ink)] hover:bg-[var(--sage)] transition-colors flex items-center justify-between gap-2"
+                        >
+                          <span>Day {d.dayNumber}</span>
+                          <span className="text-[10px] text-[var(--muted)] truncate">{d.location || d.title}</span>
+                        </button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
           )}
           <button
             onClick={onClose}
