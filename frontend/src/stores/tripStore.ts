@@ -6,20 +6,20 @@ import { prefetchImages, extractImageUrls } from '../lib/image';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
 
-export interface TripCity {
+interface TripCity {
   name: string;
   order: number;
   nights?: number;
 }
 
-export interface TripDates {
+interface TripDates {
   start: string;
   end: string;
   assumed?: boolean;
   roughMonth?: string;
 }
 
-export interface TripState {
+interface TripState {
   status: 'planning' | 'upcoming' | 'completed' | 'archived';
   cities: TripCity[];
   dates?: TripDates;
@@ -31,7 +31,7 @@ export interface TripState {
   bookings?: any[];
 }
 
-export interface Trip {
+interface Trip {
   id: number;
   _id?: string;
   title?: string;

@@ -1,14 +1,14 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 
-export const PROMPT_EXAMPLES = [
+const PROMPT_EXAMPLES = [
   "Plan a weekend in Paris for two, with cafés and art.",
   "Explore Japan for a week, from Tokyo to Kyoto.",
   "Find a quiet beach escape with great local food.",
   "Take me on a scenic road trip through Iceland.",
 ];
 
-export function createPromptCycle(element, prompts = PROMPT_EXAMPLES) {
+function createPromptCycle(element, prompts = PROMPT_EXAMPLES) {
   const timeline = gsap.timeline({ paused: true, repeat: -1 });
   for (const prompt of prompts) {
     const characters = Array.from(prompt);

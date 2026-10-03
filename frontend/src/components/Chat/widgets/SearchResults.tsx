@@ -1,7 +1,7 @@
 import { ChatMarkdown, type PlaceRef } from '../../../lib/chatMarkdown';
 import { imgUrl } from '../../../lib/image';
 
-export interface SearchResultPlace {
+interface SearchResultPlace {
   name: string;
   placeId: string;
   imageUrl: string;

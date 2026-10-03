@@ -26,7 +26,6 @@ api.interceptors.response.use(
   }
 );
 
-export { api };
 
 export const authApi = {
   updateProfile: (data: any) => api.put('/api/auth/profile', data),

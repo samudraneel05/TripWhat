@@ -1,11 +1,11 @@
 import type { ChatMessage, ToolActivity } from '../stores/chatStore';
 
-export type ChatEntry =
+type ChatEntry =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string; widgets?: any[]; toolActivities?: ToolActivity[]; error?: boolean }
   | { kind: 'answered'; question: string; answerLabel: string };
 
-export interface ChatRestore {
+interface ChatRestore {
   entries: ChatEntry[];
   /** Pending question_card widget when the last assistant turn asked a
    *  question that was never answered. */

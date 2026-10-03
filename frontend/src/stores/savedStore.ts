@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { savedApi } from '../lib/api';
 
-export interface SavedItem {
+interface SavedItem {
   id: number;
   itemType: string; // hotel | flight | place | restaurant
   name: string;

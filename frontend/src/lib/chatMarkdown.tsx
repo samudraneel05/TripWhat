@@ -84,7 +84,7 @@ function transformNode(node: any, refs: PlaceRef[], nameToId: Map<string, string
 }
 
 /** Remark plugin: convert PlaceRef names in text nodes to `place:` links. */
-export function remarkPlaceRefs(options: { places?: PlaceRef[] } = {}) {
+function remarkPlaceRefs(options: { places?: PlaceRef[] } = {}) {
   const refs = (options.places || [])
     .filter((p) => p && p.name && p.placeId)
     // Longest-first so "Senso-ji Temple" wins over "Senso-ji".

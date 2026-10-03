@@ -645,7 +645,7 @@ export function PlanTab({
   );
 }
 
-export function RecommendationCard({ item, onSelectPlace }: any) {
+function RecommendationCard({ item, onSelectPlace }: any) {
   const isHotel = item.ratePerNight != null || item.amenities != null;
   const { saveItem, isSaved } = useSavedStore();
   const itemType = isHotel ? 'hotel' : 'restaurant';
