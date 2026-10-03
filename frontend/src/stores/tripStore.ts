@@ -49,6 +49,16 @@ interface Trip {
   updatedAt?: string;
 }
 
+interface SearchPlace {
+  placeId: string;
+  name: string;
+  address: string;
+  rating: number | null;
+  type: string;
+  imageUrl: string;
+  coordinates: { lat: number; lng: number } | null;
+}
+
 interface TripStore {
   trips: Trip[];
   tripState: TripState | null;
@@ -60,6 +70,13 @@ interface TripStore {
   lastEventIds: Record<string, string>;
   joinedConversationId: string | null;
   progressiveDays: { day: number; city: string; timeSlots: any[]; totalDays?: number }[] | null;
+  // Latest place-search results — drives the map's numbered pin overlay.
+  // Replaced by each new search; cleared on conversation switch or when an
+  // itinerary lands (itinerary markers take over). searchPlacesConvId records
+  // which conversation the pins belong to so restores aren't cleared by the
+  // first room join.
+  searchPlaces: SearchPlace[] | null;
+  searchPlacesConvId: string | null;
 
   fetchTrips: () => Promise<void>;
   fetchTrip: (id: string) => Promise<void>;
@@ -74,6 +91,7 @@ interface TripStore {
   rejectDiff: () => void;
   replayMissedEvents: (conversationId: string) => Promise<void>;
   editItinerary: (conversationId: string, action: keyof typeof itineraryEditApi, data: any) => Promise<void>;
+  setSearchPlaces: (places: SearchPlace[] | null, conversationId?: string | null) => void;
 }
 
 const getToken = () => localStorage.getItem('tripwhat_token');
@@ -90,6 +108,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
   lastEventIds: {},
   joinedConversationId: null,
   progressiveDays: null,
+  searchPlaces: null,
+  searchPlacesConvId: null,
 
   fetchTrips: async () => {
     set({ loading: true, error: null });
@@ -231,11 +251,23 @@ export const useTripStore = create<TripStore>((set, get) => ({
   },
 
   setTripState: (state: TripState) => {
-    set({ tripState: state });
+    // An itinerary supersedes any explored-but-unsaved search pins.
+    set({
+      tripState: state,
+      ...(state?.itinerary ? { searchPlaces: null, searchPlacesConvId: null } : {}),
+    });
     // Background-prefetch all itinerary images through the proxy
     const urls = extractImageUrls(state);
     if (urls.length > 0) prefetchImages(urls);
   },
+
+  setSearchPlaces: (places, conversationId) =>
+    set({
+      searchPlaces: places && places.length > 0 ? places : null,
+      searchPlacesConvId: places && places.length > 0
+        ? (conversationId ?? useChatStore.getState().conversationId)
+        : null,
+    }),
 
   connectSocket: (conversationId?: string) => {
     // Join a conversation room, leaving whichever room we were in. Replay
@@ -245,7 +277,14 @@ export const useTripStore = create<TripStore>((set, get) => ({
       const prev = get().joinedConversationId;
       if (prev === convId) return;
       if (prev) sock.emit('leave:conversation', prev);
-      set({ joinedConversationId: convId });
+      // Drop the search overlay only when it belongs to a different
+      // conversation — a reload restores pins, then joins this same room.
+      const pinsBelongElsewhere =
+        get().searchPlacesConvId !== null && get().searchPlacesConvId !== convId;
+      set({
+        joinedConversationId: convId,
+        ...(pinsBelongElsewhere ? { searchPlaces: null, searchPlacesConvId: null } : {}),
+      });
       get().replayMissedEvents(convId).then(() => {
         sock.emit('join:conversation', convId);
       });
@@ -578,7 +617,10 @@ export const useTripStore = create<TripStore>((set, get) => ({
   },
 
   applyTripUpdate: (trip: Trip, changeSummary?: any[]) => {
-    set({ tripState: trip.tripState });
+    set({
+      tripState: trip.tripState,
+      ...(trip.tripState?.itinerary ? { searchPlaces: null, searchPlacesConvId: null } : {}),
+    });
     if (changeSummary) {
       useTripStore.getState();
     }

@@ -10,6 +10,7 @@ import { SavedTab } from '../components/SavedTab';
 import type { FlightOption } from '../components/FlightCard';
 import { useTripStore } from '../stores/tripStore';
 import { useChatStore, serializeMessages } from '../stores/chatStore';
+import { chatApi } from '../lib/api';
 import { useUIStore } from '../stores/uiStore';
 import { BookingsTab } from '../components/BookingsTab';
 
@@ -38,6 +39,7 @@ export default function TripWorkspacePage() {
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
+  const searchPlaces = useTripStore((s) => s.searchPlaces);
   const pendingSaveRef = useRef<any>(null);
   // On phones the two panes can't fit side-by-side — toggle between them.
   const [mobileView, setMobileView] = useState<'chat' | 'plan'>('plan');
@@ -66,11 +68,19 @@ export default function TripWorkspacePage() {
   // Handle place selection — opens detail panel AND centers map
   const handleSelectPlace = (placeId: string) => {
     setSelectedPlaceId(placeId);
-    const itinerary = tripState?.itinerary;
-    const found = findPlaceInItinerary(itinerary, placeId);
+    // On mobile the panel covers the right column — switch to it.
+    if (window.matchMedia('(max-width: 767px)').matches) setMobileView('plan');
+    const found = findPlaceInItinerary(tripState?.itinerary, placeId) ||
+      (searchPlaces || []).find((p) => p.placeId === placeId);
     if (found?.coordinates && found.coordinates.lat && found.coordinates.lng) {
       setMapCenter({ lat: found.coordinates.lat, lng: found.coordinates.lng });
     }
+  };
+
+  const handleAskQuestion = (question: string) => {
+    const convId = useChatStore.getState().conversationId;
+    if (convId) chatApi.sendMessage({ message: question, conversationId: convId });
+    if (window.matchMedia('(max-width: 767px)').matches) setMobileView('chat');
   };
 
   useEffect(() => {
@@ -141,13 +151,6 @@ export default function TripWorkspacePage() {
           onSelectPlace={handleSelectPlace}
           onSelectFlight={setSelectedFlight}
         />
-        {selectedPlaceId && (
-          <PlaceDetailPanel
-            placeId={selectedPlaceId}
-            onClose={() => setSelectedPlaceId(null)}
-            onSelectAlternate={(pid) => handleSelectPlace(pid)}
-          />
-        )}
         {selectedFlight && (
           <FlightDetailPanel
             flight={selectedFlight}
@@ -157,7 +160,7 @@ export default function TripWorkspacePage() {
       </div>
 
       {/* Right panel - map + itinerary; on mobile toggled via bottom bar */}
-      <div className={`${mobileView === 'plan' ? 'flex' : 'hidden'} md:flex flex-1 flex-col bg-[var(--bg)] min-w-0 min-h-0`}>
+      <div className={`${mobileView === 'plan' ? 'flex' : 'hidden'} md:flex flex-1 flex-col bg-[var(--bg)] min-w-0 min-h-0 relative`}>
         {tripError ? (
           <div className="flex-1 flex items-center justify-center">
             <p className="text-sm text-red-600">{tripError}</p>
@@ -170,8 +173,15 @@ export default function TripWorkspacePage() {
           <>
             {/* Map - top 40% */}
             <div className="h-[40%] shrink-0 border-b border-[var(--border)] relative bg-[var(--sage)]">
-              {itinerary ? (
-                <TripMap itinerary={itinerary} selectedCity={cityFilter} destination={cities[0]?.name} centerOnCoords={mapCenter} />
+              {itinerary || (searchPlaces && searchPlaces.length > 0) ? (
+                <TripMap
+                  itinerary={itinerary}
+                  selectedCity={cityFilter}
+                  destination={cities[0]?.name}
+                  centerOnCoords={mapCenter}
+                  searchPlaces={searchPlaces}
+                  onSelectSearchPlace={handleSelectPlace}
+                />
               ) : (
                 <div className="h-full flex items-center justify-center">
                   <div className="text-center">
@@ -235,6 +245,14 @@ export default function TripWorkspacePage() {
               </div>
             </div>
           </>
+        )}
+        {selectedPlaceId && (
+          <PlaceDetailPanel
+            placeId={selectedPlaceId}
+            onClose={() => setSelectedPlaceId(null)}
+            onSelectAlternate={(pid) => handleSelectPlace(pid)}
+            onAskQuestion={handleAskQuestion}
+          />
         )}
       </div>
 

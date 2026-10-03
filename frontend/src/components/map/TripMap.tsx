@@ -3,11 +3,22 @@ import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { imgUrl } from '../../lib/image';
 
+interface SearchPlacePin {
+  placeId: string;
+  name: string;
+  address?: string;
+  rating?: number | null;
+  type?: string;
+  coordinates: { lat: number; lng: number } | null;
+}
+
 interface TripMapProps {
   itinerary: any;
   selectedCity?: string | null;
   destination?: string | null;
   centerOnCoords?: { lat: number; lng: number } | null;
+  searchPlaces?: SearchPlacePin[] | null;
+  onSelectSearchPlace?: (placeId: string) => void;
 }
 
 const MARKER_COLORS = [
@@ -40,12 +51,14 @@ function lookupCityCoord(name: string): [number, number] | null {
   return null;
 }
 
-export function TripMap({ itinerary, selectedCity, destination, centerOnCoords }: TripMapProps) {
+export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, searchPlaces, onSelectSearchPlace }: TripMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const markersRef = useRef<mapboxgl.Marker[]>([]);
+  const searchMarkersRef = useRef<mapboxgl.Marker[]>([]);
   const lastDestRef = useRef<string | null>(null);
   const lastBoundsSigRef = useRef<string>('');
+  const lastSearchSigRef = useRef<string>('');
   const [dayFilter, setDayFilter] = useState<number | null>(null); // null = all days
 
   useEffect(() => {
@@ -88,6 +101,8 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords }
     return () => {
       markersRef.current.forEach((m) => m.remove());
       markersRef.current = [];
+      searchMarkersRef.current.forEach((m) => m.remove());
+      searchMarkersRef.current = [];
       map.remove();
       mapRef.current = null;
     };
@@ -210,6 +225,79 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords }
       map.once('load', addMarkers);
     }
   }, [itinerary, selectedCity, dayFilter]);
+
+  // --- Search-result pins (numbered, teal) + camera fit ---
+  // Places the user is *exploring* in chat — distinct from itinerary pins
+  // (day colors). Rebuilt when the search set changes; fitBounds only when
+  // the itinerary hasn't already framed a view.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const renderPins = () => {
+      searchMarkersRef.current.forEach((m) => m.remove());
+      searchMarkersRef.current = [];
+
+      const places = (searchPlaces || []).filter(
+        (p) => p.coordinates && p.coordinates.lat != null && p.coordinates.lng != null
+      );
+      if (places.length === 0) {
+        lastSearchSigRef.current = '';
+        return;
+      }
+
+      const bounds = new mapboxgl.LngLatBounds();
+      places.forEach((p, i) => {
+        const el = document.createElement('div');
+        el.style.cssText = `
+          width: 24px; height: 24px; border-radius: 50%;
+          background: #0D9488; border: 2px solid #fff;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+          cursor: pointer; display: flex; align-items: center;
+          justify-content: center; font-size: 10px; color: #fff;
+          font-weight: 700;
+        `;
+        el.textContent = String(i + 1);
+        const popup = new mapboxgl.Popup({ offset: 14, closeButton: false, closeOnClick: false });
+        popup.setHTML(
+          `<div style="font-family: Inter, sans-serif; padding: 4px 2px; max-width: 200px;">
+            <div style="font-size: 12px; font-weight: 600; color: #1C1917;">${p.name}</div>
+            <div style="font-size: 11px; color: #78716C;">${
+              [p.type, p.rating != null ? `★ ${p.rating}` : ''].filter(Boolean).join(' · ')
+            }</div>
+          </div>`
+        );
+        const marker = new mapboxgl.Marker(el)
+          .setLngLat([p.coordinates!.lng, p.coordinates!.lat])
+          .setPopup(popup)
+          .addTo(map);
+        el.addEventListener('mouseenter', () => popup.addTo(map));
+        el.addEventListener('mouseleave', () => popup.remove());
+        el.addEventListener('click', () => onSelectSearchPlace?.(p.placeId));
+        searchMarkersRef.current.push(marker);
+        bounds.extend([p.coordinates!.lng, p.coordinates!.lat]);
+      });
+
+      const sig = places.map((p) => p.placeId).sort().join('|');
+      if (sig === lastSearchSigRef.current) return;
+      lastSearchSigRef.current = sig;
+
+      // Itinerary markers own the camera when present (bounds signature set)
+      if (lastBoundsSigRef.current) return;
+
+      if (places.length === 1) {
+        map.flyTo({ center: [places[0].coordinates!.lng, places[0].coordinates!.lat], zoom: 13, speed: 1.2, essential: true });
+      } else {
+        map.fitBounds(bounds, { padding: 60, maxZoom: 13 });
+      }
+    };
+
+    if (map.loaded()) {
+      renderPins();
+    } else {
+      map.once('load', renderPins);
+    }
+  }, [searchPlaces, onSelectSearchPlace]);
 
   // Fly-to animation when destination changes
   useEffect(() => {

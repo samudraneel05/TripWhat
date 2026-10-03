@@ -54,6 +54,12 @@ export function ChatPanel({
   const [itinerarySummary, setItinerarySummary] = useState<any>(null);
   const [flightCards, setFlightCards] = useState<any[]>([]);
   const [searchResults, setSearchResults] = useState<any>(null);
+
+  // Mirror search results into the trip store — the map renders them as
+  // numbered pins and flies to the searched area.
+  useEffect(() => {
+    useTripStore.getState().setSearchPlaces(searchResults?.places ?? null);
+  }, [searchResults]);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [hasStarted, setHasStarted] = useState(false);
   const [showReconnecting, setShowReconnecting] = useState(false);

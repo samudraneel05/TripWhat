@@ -34,6 +34,8 @@ export default function NewTripPage() {
   const [localTripState, setLocalTripState] = useState<any>(null);
   const [selectedPlaceId, setSelectedPlaceId] = useState<string | null>(null);
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
+  const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
+  const searchPlaces = useTripStore((s) => s.searchPlaces);
   // On phones the two panes can't fit side-by-side — toggle between them.
   const [mobileView, setMobileView] = useState<'chat' | 'plan'>('chat');
   const sawItineraryRef = useRef(false);
@@ -158,6 +160,50 @@ export default function NewTripPage() {
   const itinerary = localTripState?.itinerary || null;
   const cities = localTripState?.cities || [];
 
+  // Selecting a place (card, map pin, link) opens the detail panel and, when
+  // we know its coordinates, flies the map to it. Search results carry coords;
+  // itinerary places too — check both.
+  const handleSelectPlace = useCallback((placeId: string) => {
+    setSelectedPlaceId(placeId);
+    if (window.matchMedia('(max-width: 767px)').matches) setMobileView('plan');
+    const fromSearch = (useTripStore.getState().searchPlaces || []).find(
+      (p) => p.placeId === placeId
+    );
+    const coords = fromSearch?.coordinates;
+    if (coords && coords.lat != null && coords.lng != null) {
+      setMapCenter({ lat: coords.lat, lng: coords.lng });
+      return;
+    }
+    const itin = localTripState?.itinerary;
+    if (!itin) return;
+    for (const day of itin.days || []) {
+      for (const slot of day.timeSlots || []) {
+        for (const act of slot.activities || (slot.activity ? [slot.activity] : [])) {
+          if (act.placeId === placeId && act.coordinates?.lat != null) {
+            setMapCenter({ lat: act.coordinates.lat, lng: act.coordinates.lng });
+            return;
+          }
+        }
+      }
+    }
+    for (const list of [itin.hotelRecommendations, itin.restaurantRecommendations] as any[]) {
+      for (const item of list || []) {
+        if (item.placeId === placeId && item.coordinates?.lat != null) {
+          setMapCenter({ lat: item.coordinates.lat, lng: item.coordinates.lng });
+          return;
+        }
+      }
+    }
+  }, [localTripState]);
+
+  // Place panel "ask" chips — route through the chat send path so the answer
+  // lands in the conversation like any user message.
+  const handleAskQuestion = useCallback((question: string) => {
+    const convId = useChatStore.getState().conversationId;
+    if (convId) chatApi.sendMessage({ message: question, conversationId: convId });
+    if (window.matchMedia('(max-width: 767px)').matches) setMobileView('chat');
+  }, []);
+
   // When the first itinerary lands, surface it on mobile once.
   useEffect(() => {
     if (itinerary && !sawItineraryRef.current) {
@@ -178,15 +224,8 @@ export default function NewTripPage() {
           title="New trip"
           initialMessage={routeConvId ? '' : initialQuery}
           onTripStateUpdate={handleTripStateUpdate}
-          onSelectPlace={setSelectedPlaceId}
+          onSelectPlace={handleSelectPlace}
         />
-        {selectedPlaceId && (
-          <PlaceDetailPanel
-            placeId={selectedPlaceId}
-            onClose={() => setSelectedPlaceId(null)}
-            onSelectAlternate={(pid) => setSelectedPlaceId(pid)}
-          />
-        )}
         {selectedFlight && (
           <FlightDetailPanel
             flight={selectedFlight}
@@ -196,10 +235,16 @@ export default function NewTripPage() {
       </div>
 
       {/* Right panel - map + workspace; on mobile toggled via bottom bar */}
-      <div className={`${mobileView === 'plan' ? 'flex' : 'hidden'} md:flex flex-1 flex-col bg-[var(--bg)] min-w-0 min-h-0`}>
+      <div className={`${mobileView === 'plan' ? 'flex' : 'hidden'} md:flex flex-1 flex-col bg-[var(--bg)] min-w-0 min-h-0 relative`}>
         {/* Map - top 40% */}
         <div className="h-[40%] shrink-0 border-b border-[var(--border)] relative bg-[var(--sage)]">
-          <TripMap itinerary={itinerary} destination={destination} />
+          <TripMap
+            itinerary={itinerary}
+            destination={destination}
+            searchPlaces={searchPlaces}
+            centerOnCoords={mapCenter}
+            onSelectSearchPlace={handleSelectPlace}
+          />
         </div>
 
         {/* Trip workspace - bottom 60% */}
@@ -259,6 +304,14 @@ export default function NewTripPage() {
             {activeTab === 'saved' && <SavedTab />}
           </div>
         </div>
+        {selectedPlaceId && (
+          <PlaceDetailPanel
+            placeId={selectedPlaceId}
+            onClose={() => setSelectedPlaceId(null)}
+            onSelectAlternate={(pid) => handleSelectPlace(pid)}
+            onAskQuestion={conversationId ? handleAskQuestion : undefined}
+          />
+        )}
       </div>
 
       {/* Mobile Chat / Plan switcher */}
