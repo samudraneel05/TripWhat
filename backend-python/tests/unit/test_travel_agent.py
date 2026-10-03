@@ -559,3 +559,30 @@ async def test_viator_search_activities_empty_without_key():
     with patch("app.services.viator_service.settings") as s:
         s.viator_api_key = ""
         assert await svc.search_activities("Brandenburg Gate", "Berlin") == []
+
+
+def test_tool_result_summary_search_places_is_friendly(agent):
+    out = "Found 12 places for 'attractions':\n\n**Palazzo Vecchio** (rating: None, type: place)\n  Address: x"
+    s = agent._tool_result_summary(
+        "mcp_search_places",
+        {"text_query": "attractions in Florence", "city": "Florence", "search_type": "attractions"},
+        out,
+    )
+    assert s == "Found 12 attractions in Florence"
+
+
+def test_merge_places_fills_gaps_on_duplicates():
+    from app.services.places_search import PlacesSearchService
+
+    google = [{"placeId": "p1", "name": "Gate", "rating": 4.7, "photo_url": "http://x"}]
+    mcp = [
+        {"placeId": "p1", "name": "Gate"},                      # dup — sparse
+        {"placeId": "p2", "name": "Tower"},                     # mcp-only
+    ]
+    merged = PlacesSearchService._merge_places(google, mcp)
+    assert len(merged) == 2
+    assert merged[0]["rating"] == 4.7
+    # reverse order: mcp sparse base, google extra fills it
+    merged2 = PlacesSearchService._merge_places(mcp, google)
+    assert merged2[0]["rating"] == 4.7
+    assert merged2[0]["photo_url"] == "http://x"

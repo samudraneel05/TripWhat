@@ -56,8 +56,11 @@ async def mcp_search_places(text_query: str, city: str = "", exclude: list[str] 
     else:
         search_query = text_query
 
-    # Use cache-first search service (MCP → Google Places → OpenTripMap)
-    results = await places_search.search(search_query, city or text_query, limit=10)
+    # Merged provider search (Google Places ∥ MCP, OTM top-up) with photos
+    # resolved for the top results — the chat cards and map pins need URLs.
+    results = await places_search.search_with_photos(
+        search_query, city or text_query, limit=18, photo_limit=12
+    )
 
     if exclude:
         excluded = {str(e).strip().lower() for e in exclude}
@@ -76,13 +79,17 @@ async def mcp_search_places(text_query: str, city: str = "", exclude: list[str] 
     summaries = []
     for r in results:
         name = r.get("name", "Unknown")
-        rating = r.get("rating", "N/A")
-        address = r.get("address", "")
-        rtype = ", ".join(r.get("types", [])[:3]) if r.get("types") else "place"
+        meta = []
+        if r.get("rating"):
+            meta.append(f"★ {r['rating']}")
+        types = [t for t in (r.get("types") or []) if t != "point_of_interest"]
+        if types:
+            meta.append(", ".join(types[:2]))
+        head = f"**{name}**" + (f" — {', '.join(meta)}" if meta else "")
         coords = r.get("coordinates", {})
         summaries.append(
-            f"**{name}** (rating: {rating}, type: {rtype})\n"
-            f"  Address: {address}\n"
+            f"{head}\n"
+            f"  Address: {r.get('address', '')}\n"
             f"  Coordinates: {coords.get('lat', 0)}, {coords.get('lng', 0)}\n"
             f"  Place ID: {r.get('placeId', 'N/A')}"
         )

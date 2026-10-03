@@ -10,22 +10,23 @@ class GooglePlacesService:
     BASE_URL = "https://maps.googleapis.com/maps/api/place"
 
     async def search_places(self, query: str, location: str | None = None) -> list[dict]:
+        """Broad place query — Text Search returns up to 20 candidates/page.
+        (Find Place /findplacefromtext is a best-match lookup and would cap
+        list-style queries like 'attractions in Florence' at ~1 result.)"""
         if not settings.google_places_api_key:
             return []
 
         async with httpx.AsyncClient(timeout=10.0) as client:
             params = {
-                "input": query,
-                "inputtype": "textquery",
-                "fields": "place_id,name,formatted_address,geometry,rating,photos,types",
+                "query": query,
                 "key": settings.google_places_api_key,
             }
             if location:
-                params["locationbias"] = f"point:{location}"
+                params["location"] = location
 
-            resp = await client.get(f"{self.BASE_URL}/findplacefromtext/json", params=params)
+            resp = await client.get(f"{self.BASE_URL}/textsearch/json", params=params)
             data = resp.json()
-            candidates = data.get("candidates", [])
+            candidates = data.get("results", [])
 
             results = []
             for c in candidates:

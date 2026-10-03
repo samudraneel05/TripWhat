@@ -57,15 +57,16 @@ class PlacesSearchService:
                 logger.info(f"[PLACES_SEARCH] Cache hit for '{query}' → {len(cached)} places")
                 return cached[:limit]
 
-        # Fallback chain: MCP → Google Places API → OpenTripMap. A provider
-        # that returns a non-empty but sparse result set (e.g. 1 hit for a
-        # country-level query) is supplemented by the next provider — broad
-        # queries like "attractions in Australia" often yield few results
-        # from a single source.
+        # Provider merge: MCP (Google Maps Grounding Lite) and Google Places
+        # run in parallel — MCP is fast but returns ~5 sparse entries; Google
+        # Places returns up to 20 with ratings/types/photos. Google goes first
+        # so its richer fields win conflicts; MCP gaps get filled in. OTM only
+        # tops up when both stay thin (e.g. obscure queries).
         min_useful = min(4, limit)
-        places = await self._search_mcp(query, city, limit)
-        if len(places) < min_useful:
-            places = self._merge_places(places, await self._search_google_places(query, city, limit))
+        google_task = asyncio.create_task(self._search_google_places(query, city, limit))
+        mcp_task = asyncio.create_task(self._search_mcp(query, city, limit))
+        google, mcp = await asyncio.gather(google_task, mcp_task)
+        places = self._merge_places(google, mcp)
         if len(places) < min_useful:
             places = self._merge_places(places, await self._search_opentripmap(query, city, limit))
 
@@ -76,15 +77,33 @@ class PlacesSearchService:
 
     @staticmethod
     def _merge_places(base: list[dict], extra: list[dict]) -> list[dict]:
-        """Merge provider results, deduped by placeId then lowercase name."""
-        seen = {(p.get("placeId") or p.get("id") or p.get("name", "")).lower() if isinstance(p.get("placeId") or p.get("id") or p.get("name", ""), str) else (p.get("placeId") or p.get("id") or "") for p in base}
-        merged = list(base)
+        """Merge provider results, deduped by placeId then lowercase name.
+
+        `base` wins conflicts; on a duplicate the extra entry fills any
+        fields the base left empty (MCP hits often lack rating/photo/types
+        that Google's copy of the same place carries).
+        """
+        def _key(p: dict):
+            k = p.get("placeId") or p.get("id") or p.get("name", "")
+            return k.lower() if isinstance(k, str) else k
+
+        _FILLABLE = ("rating", "photo_url", "image_url", "types", "description",
+                     "website", "phone", "address", "priceLevel", "opening_hours")
+
+        index = {_key(p): i for i, p in enumerate(base)}
+        merged = [dict(p) for p in base]
         for p in extra:
-            key = p.get("placeId") or p.get("id") or p.get("name", "")
-            key_l = key.lower() if isinstance(key, str) else key
-            if key_l and key_l not in seen:
-                seen.add(key_l)
-                merged.append(p)
+            k = _key(p)
+            if not k:
+                continue
+            if k in index:
+                tgt = merged[index[k]]
+                for f in _FILLABLE:
+                    if not tgt.get(f) and p.get(f):
+                        tgt[f] = p[f]
+            else:
+                index[k] = len(merged)
+                merged.append(dict(p))
         return merged
 
     async def search_with_photos(
@@ -93,20 +112,24 @@ class PlacesSearchService:
         city: str,
         limit: int = 10,
         skip_cache: bool = False,
+        photo_limit: int | None = None,
     ) -> list[dict]:
         """Search for places and resolve photo references to direct image URLs.
 
         After the standard search, any place with a photo_url that isn't already
         a direct http URL gets resolved via the Google Places Photo API.
-        Resolved URLs are cached back into places_cache.
+        Resolved URLs are cached back into places_cache. `photo_limit` bounds
+        the fan-out — only the first N places get their refs resolved (the
+        chat card strip only displays the top results anyway).
         """
         places = await self.search(query, city, limit, skip_cache)
 
         if not places:
             return places
 
-        # Resolve photo references in parallel
-        tasks = [self._resolve_place_photo(p) for p in places if p.get("photo_url")]
+        # Resolve photo references in parallel, top N only
+        to_resolve = places[:photo_limit] if photo_limit else places
+        tasks = [self._resolve_place_photo(p) for p in to_resolve if p.get("photo_url")]
         await asyncio.gather(*tasks, return_exceptions=True)
 
         return places
@@ -213,6 +236,19 @@ class PlacesSearchService:
             if not places:
                 return None
 
+            place_dicts = [self._orm_to_dict(p) for p in places]
+
+            # Stale-data guard: cache entries written before the provider
+            # merge carry only the bare MCP shape (no rating, photo, or type
+            # on every single entry). Treat those as a miss so the merged
+            # search runs once and the cache self-heals.
+            if all(
+                not p.get("rating") and not p.get("photo_url") and not p.get("types")
+                for p in place_dicts
+            ):
+                logger.info(f"[PLACES_SEARCH] Sparse cache entry for '{query}' — refetching")
+                return None
+
             # Update access stats
             await db.execute(
                 update(PlacesCache)
@@ -221,7 +257,7 @@ class PlacesSearchService:
             )
             await db.commit()
 
-            return [self._orm_to_dict(p) for p in places]
+            return place_dicts
 
     async def _get_cached_by_name(self, name: str, city: str) -> dict | None:
         """Get a cached place by name (fuzzy match)."""

@@ -482,6 +482,16 @@ class TravelAgent:
         # drop markdown emphasis markers that would render literally.
         text = re.sub(r"\s+", " ", text).replace("**", "").replace("__", "").strip()
 
+        # Place search: show a clean one-liner — "Found 12 attractions in
+        # Florence" — not the model-facing per-place detail that follows.
+        if tool_name == "mcp_search_places":
+            m = re.match(r"Found (\d+) places for '([^']+)'", text)
+            if m:
+                count, q = m.groups()
+                st = (tool_input or {}).get("search_type") or "places"
+                where = (tool_input or {}).get("city") or q
+                return f"Found {count} {st} in {where}"
+
         # Try to extract a count from string output
         if "found" in text.lower():
             # e.g. "Found 10 hotels" → use as-is
@@ -1051,10 +1061,13 @@ class TravelAgent:
                 raw_coords = p.get("coordinates") or {}
                 lat = raw_coords.get("lat")
                 lng = raw_coords.get("lng") if raw_coords.get("lng") is not None else raw_coords.get("lon")
+                photo = p.get("photo_url") or p.get("imageUrl") or ""
                 places.append({
                     "name": name,
                     "placeId": pid,
-                    "imageUrl": p.get("photo_url") or p.get("imageUrl") or "",
+                    # only emit resolvable URLs — an unresolved photo ref
+                    # renders as a broken img instead of the letter placeholder
+                    "imageUrl": photo if str(photo).startswith("http") else "",
                     "rating": p.get("rating"),
                     "type": ", ".join((p.get("types") or [])[:2]),
                     "address": p.get("address", ""),
@@ -1063,7 +1076,7 @@ class TravelAgent:
                         if lat is not None and lng is not None else None
                     ),
                 })
-                if len(places) >= 8:
+                if len(places) >= 16:
                     break
             if places:
                 widgets.append({
