@@ -36,6 +36,7 @@ export default function NewTripPage() {
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
   const searchPlaces = useTripStore((s) => s.searchPlaces);
+  const hoveredSearchPlaceId = useTripStore((s) => s.hoveredSearchPlaceId);
   // On phones the two panes can't fit side-by-side — toggle between them.
   const [mobileView, setMobileView] = useState<'chat' | 'plan'>('chat');
   const sawItineraryRef = useRef(false);
@@ -243,6 +244,8 @@ export default function NewTripPage() {
             searchPlaces={searchPlaces}
             centerOnCoords={mapCenter}
             onSelectSearchPlace={handleSelectPlace}
+            hoveredSearchPlaceId={hoveredSearchPlaceId}
+            onClearSearchPlaces={() => useTripStore.getState().setSearchPlaces(null)}
           />
         </div>
 

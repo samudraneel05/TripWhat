@@ -40,6 +40,7 @@ export default function TripWorkspacePage() {
   const [selectedFlight, setSelectedFlight] = useState<FlightOption | null>(null);
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number } | null>(null);
   const searchPlaces = useTripStore((s) => s.searchPlaces);
+  const hoveredSearchPlaceId = useTripStore((s) => s.hoveredSearchPlaceId);
   const pendingSaveRef = useRef<any>(null);
   // On phones the two panes can't fit side-by-side — toggle between them.
   const [mobileView, setMobileView] = useState<'chat' | 'plan'>('plan');
@@ -182,6 +183,8 @@ export default function TripWorkspacePage() {
                   centerOnCoords={mapCenter}
                   searchPlaces={searchPlaces}
                   onSelectSearchPlace={handleSelectPlace}
+                  hoveredSearchPlaceId={hoveredSearchPlaceId}
+                  onClearSearchPlaces={() => useTripStore.getState().setSearchPlaces(null)}
                 />
               ) : (
                 <div className="h-full flex items-center justify-center">

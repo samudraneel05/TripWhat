@@ -15,9 +15,11 @@ interface SearchResultsProps {
   data: { places: SearchResultPlace[] };
   text: string;
   onSelectPlace?: (placeId: string) => void;
+  /** Card hover → the map lifts this place's pin (card↔pin correlation). */
+  onHoverPlace?: (placeId: string | null) => void;
 }
 
-export function SearchResults({ data, text, onSelectPlace }: SearchResultsProps) {
+export function SearchResults({ data, text, onSelectPlace, onHoverPlace }: SearchResultsProps) {
   const { places } = data;
   const refs: PlaceRef[] = places.map((p) => ({ name: p.name, placeId: p.placeId }));
 
@@ -34,9 +36,9 @@ export function SearchResults({ data, text, onSelectPlace }: SearchResultsProps)
         className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
       />
 
-      {/* Postcard strip — horizontal snap-scroll; card numbers match the
-          map's search pins. Fixed width keeps ~2.5 cards visible as the
-          scroll affordance. */}
+      {/* Postcard strip — horizontal snap-scroll; hovering a card lifts
+          its map pin. Fixed width keeps ~2.5 cards visible as the scroll
+          affordance. */}
       {places.length > 0 && (
         <div className="flex gap-2.5 overflow-x-auto pb-1.5 -mx-1 px-1 snap-x snap-mandatory
                         [&::-webkit-scrollbar]:h-1
@@ -47,6 +49,8 @@ export function SearchResults({ data, text, onSelectPlace }: SearchResultsProps)
             <button
               key={p.placeId || i}
               onClick={() => p.placeId && onSelectPlace?.(p.placeId)}
+              onMouseEnter={() => p.placeId && onHoverPlace?.(p.placeId)}
+              onMouseLeave={() => onHoverPlace?.(null)}
               className={`group shrink-0 w-[188px] snap-start bg-white rounded-[3px]
                           shadow-[0_2px_10px_rgba(0,0,0,0.14),0_1px_2px_rgba(0,0,0,0.08)]
                           p-2 pb-0 transition-transform duration-200
@@ -69,9 +73,6 @@ export function SearchResults({ data, text, onSelectPlace }: SearchResultsProps)
                     </span>
                   </div>
                 )}
-                <span className="absolute top-1.5 left-1.5 w-5 h-5 rounded-full bg-[#0D9488] text-white text-[10px] font-bold flex items-center justify-center shadow-sm">
-                  {i + 1}
-                </span>
               </div>
               {/* Polaroid bottom band — just the name, typewriter feel */}
               <div className="pt-3 pb-2.5 text-center">
