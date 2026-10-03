@@ -456,6 +456,11 @@ class TravelAgent:
                         parts.append(block_text)
             raw = " ".join(p for p in parts if p)
 
+        # Internal catalog plumbing + uncountable sources: the label already
+        # carries the context — don't leak raw result dicts into the chip.
+        if tool_name in ("search_tools", "web_search"):
+            return ""
+
         if isinstance(raw, str):
             text = raw.strip()
         elif isinstance(raw, dict):
@@ -491,6 +496,13 @@ class TravelAgent:
                 st = (tool_input or {}).get("search_type") or "places"
                 where = (tool_input or {}).get("city") or q
                 return f"Found {count} {st} in {where}"
+
+        # Nearby search: "Found N <type> near <place>"
+        if tool_name == "mcp_find_nearby":
+            m = re.match(r"Found (\d+) (\w+) places near ([^(:]+)", text)
+            if m:
+                count, kind, place = m.groups()
+                return f"Found {count} {kind} near {place.strip()}"
 
         # Try to extract a count from string output
         if "found" in text.lower():
