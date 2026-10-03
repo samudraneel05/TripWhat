@@ -23,7 +23,7 @@ async def _get_auth_token(client) -> str:
 @pytest.mark.asyncio
 async def test_create_trip(client):
     token = await _get_auth_token(client)
-    resp = await client.post("/api/saved-trips/", json={
+    resp = await client.post("/api/saved-trips", json={
         "title": "Japan Trip",
         "cities": [{"name": "Tokyo", "days": 5}],
         "totalDays": 5,
@@ -39,12 +39,12 @@ async def test_create_trip(client):
 async def test_list_trips(client):
     token = await _get_auth_token(client)
     # Create a trip first
-    await client.post("/api/saved-trips/", json={
+    await client.post("/api/saved-trips", json={
         "title": "Japan Trip",
         "totalDays": 5,
     }, headers={"Authorization": f"Bearer {token}"})
     # List
-    resp = await client.get("/api/saved-trips/", headers={"Authorization": f"Bearer {token}"})
+    resp = await client.get("/api/saved-trips", headers={"Authorization": f"Bearer {token}"})
     assert resp.status_code == 200
     data = resp.json()
     assert len(data["savedTrips"]) >= 1
@@ -53,7 +53,7 @@ async def test_list_trips(client):
 @pytest.mark.asyncio
 async def test_get_trip(client):
     token = await _get_auth_token(client)
-    create = await client.post("/api/saved-trips/", json={
+    create = await client.post("/api/saved-trips", json={
         "title": "Japan Trip",
         "totalDays": 5,
     }, headers={"Authorization": f"Bearer {token}"})
@@ -66,7 +66,7 @@ async def test_get_trip(client):
 @pytest.mark.asyncio
 async def test_delete_trip(client):
     token = await _get_auth_token(client)
-    create = await client.post("/api/saved-trips/", json={
+    create = await client.post("/api/saved-trips", json={
         "title": "Japan Trip",
         "totalDays": 5,
     }, headers={"Authorization": f"Bearer {token}"})
@@ -98,7 +98,7 @@ async def test_create_trip_with_trip_state_cities(client):
         "dates": {"flexible": True},
         "onboarding": {"slotsFilled": ["destination", "dates", "duration", "travelers", "trip_style", "help_with"], "completed": True},
     }
-    resp = await client.post("/api/saved-trips/", json={
+    resp = await client.post("/api/saved-trips", json={
         "title": "Japan Trip",
         "cities": [
             {"name": "Tokyo", "days": 4},
@@ -121,7 +121,7 @@ async def test_create_trip_with_trip_state_dates_sets_upcoming(client):
     token = await _get_auth_token(client)
     from datetime import datetime, timedelta
     future_date = (datetime.utcnow() + timedelta(days=30)).isoformat()
-    resp = await client.post("/api/saved-trips/", json={
+    resp = await client.post("/api/saved-trips", json={
         "title": "Future Trip",
         "cities": [{"name": "Paris", "days": 5}],
         "totalDays": 5,
@@ -143,7 +143,7 @@ async def test_create_trip_with_trip_state_dates_sets_upcoming(client):
 async def test_create_trip_with_invalid_cities_shape_returns_422(client):
     """Test that sending cities with wrong shape (missing days field) returns 422."""
     token = await _get_auth_token(client)
-    resp = await client.post("/api/saved-trips/", json={
+    resp = await client.post("/api/saved-trips", json={
         "title": "Bad Trip",
         "cities": [{"name": "Tokyo", "nights": 3}],
         "totalDays": 5,
@@ -158,7 +158,7 @@ async def test_create_trip_with_z_suffix_date(client):
     """Test that ISO 8601 dates with Z suffix (from JS toISOString) don't cause 500.
     Python 3.10's datetime.fromisoformat doesn't support Z — the _parse_iso helper handles it."""
     token = await _get_auth_token(client)
-    resp = await client.post("/api/saved-trips/", json={
+    resp = await client.post("/api/saved-trips", json={
         "title": "Paris Trip",
         "cities": [{"name": "Paris", "days": 5}],
         "totalDays": 5,
@@ -175,7 +175,7 @@ async def test_create_trip_with_z_suffix_date(client):
 async def test_create_trip_with_trip_state_z_suffix_date(client):
     """Test that tripState dates with Z suffix don't cause 500."""
     token = await _get_auth_token(client)
-    resp = await client.post("/api/saved-trips/", json={
+    resp = await client.post("/api/saved-trips", json={
         "title": "Paris Trip",
         "cities": [{"name": "Paris", "days": 5}],
         "totalDays": 5,

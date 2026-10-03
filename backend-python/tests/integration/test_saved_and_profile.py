@@ -11,7 +11,7 @@ async def _register(client, email):
 
 
 async def _create_trip(client, headers):
-    resp = await client.post("/api/saved-trips/", json={
+    resp = await client.post("/api/saved-trips", json={
         "title": "Trip", "cities": [{"name": "Tokyo", "days": 2}],
         "totalDays": 2, "people": 1, "travelType": "balanced",
     }, headers=headers)

@@ -23,7 +23,6 @@ class SerpApiProvider:
         travel_class: str = "economy",
         max_price: int | None = None,
         currency: str = "USD",
-        deep_search: bool = False,
     ) -> list[dict]:
         if not self._api_key():
             logger.warning("SERPAPI_API_KEY not configured")

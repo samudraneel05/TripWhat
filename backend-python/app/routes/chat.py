@@ -105,14 +105,7 @@ def _sanitize_json(obj):
     return obj
 
 
-@router.post("/conversation")
-async def create_conversation():
-    return {"conversationId": str(uuid.uuid4())}
-
-
 @router.post("")
-@router.post("/")
-@router.post("/message")
 async def send_message(
     req: SendMessageRequest,
     user: User = Depends(get_current_user),
@@ -470,7 +463,6 @@ async def _heartbeat_loop(conv_id: str, user_id: int) -> None:
 
 
 @router.get("")
-@router.get("/")
 async def list_conversations(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -500,7 +492,6 @@ async def list_conversations(
     return {"conversations": items}
 
 
-@router.get("/history/{conversation_id}")
 @router.get("/{conversation_id}")
 async def get_conversation(
     conversation_id: str,

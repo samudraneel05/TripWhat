@@ -57,12 +57,6 @@ class MoveItemRequest(BaseModel):
     to_slot: str = "morning"
 
 
-class ReorderRequest(BaseModel):
-    day: int
-    activity_id: str
-    new_position: int
-
-
 # --- Helpers ---
 
 async def _get_conversation_state(db: AsyncSession, conversation_id: str, user: User) -> dict:
@@ -294,28 +288,6 @@ async def move_item(
         },
     }
     result = itinerary_editor.move_activity(itinerary, action)
-
-    new_trip_state = dict(trip_state)
-    new_trip_state["itinerary"] = result["itinerary"]
-    await _save_state(db, conversation, new_trip_state)
-
-    return {"tripState": new_trip_state, "message": result["message"]}
-
-
-@router.post("/reorder")
-async def reorder_item(
-    conversation_id: str,
-    req: ReorderRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    """Reorder an activity within a day."""
-    conversation, trip_state = await _get_conversation_state(db, conversation_id, user)
-    itinerary = trip_state.get("itinerary")
-    if not itinerary:
-        raise HTTPException(status_code=400, detail="No itinerary found.")
-
-    result = itinerary_editor.reorder_activity(itinerary, req.day, req.activity_id, req.new_position)
 
     new_trip_state = dict(trip_state)
     new_trip_state["itinerary"] = result["itinerary"]

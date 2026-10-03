@@ -39,10 +39,6 @@ class Settings(BaseSettings):
     langsmith_project: str = "tripwhat-agent"
     langsmith_workspace_id: str = ""
 
-    # GeoDB
-    geodb_api_key: str = ""
-    geodb_host: str = "wft-geo-db.p.rapidapi.com"
-
     # JWT
     jwt_secret: str = "fallback-secret"
     jwt_expires_in_days: int = 7

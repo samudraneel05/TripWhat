@@ -55,6 +55,3 @@ class UpdateTripRequest(BaseModel):
     isPublic: bool | None = None
     tags: list[str] | None = None
 
-
-class MarkUpcomingRequest(BaseModel):
-    tripStartDate: str

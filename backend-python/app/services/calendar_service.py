@@ -72,26 +72,6 @@ class CalendarService:
         """Revoke the Google grant and clear stored tokens."""
         return await google_oauth.revoke_and_disconnect(user_id)
 
-    async def list_upcoming_events(self, user_id: str, max_results: int = 20) -> list[dict]:
-        service, creds, prev_token = await self._get_authorized_client(user_id)
-        from datetime import datetime, timezone
-        try:
-            events_result = await google_oauth.run_sync(
-                service.events().list(
-                    calendarId="primary",
-                    timeMin=datetime.now(timezone.utc).isoformat() + "Z",
-                    maxResults=max_results,
-                    singleEvents=True,
-                    orderBy="startTime",
-                ).execute
-            )
-        except Exception as e:
-            await google_oauth.handle_auth_failure(user_id, e)
-            raise
-        finally:
-            await google_oauth.persist_if_refreshed(user_id, creds, prev_token)
-        return events_result.get("items", [])
-
     async def create_event(self, user_id: str, event_data: dict) -> dict:
         service, creds, prev_token = await self._get_authorized_client(user_id)
         try:

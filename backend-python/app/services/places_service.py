@@ -1,4 +1,4 @@
-"""Places service — OpenTripMap search + GeoDB autocomplete."""
+"""Places service — OpenTripMap search."""
 
 import asyncio
 import httpx
@@ -8,16 +8,9 @@ from app.config import settings
 
 class PlacesService:
     OTM_BASE = "https://api.opentripmap.com/0.1/en/places"
-    GEODB_BASE = "https://wft-geo-db.p.rapidapi.com/v1/geo"
 
     def _otm_key(self) -> str:
         return settings.opentripmap_api_key
-
-    def _geodb_key(self) -> str:
-        return settings.geodb_api_key
-
-    def _geodb_host(self) -> str:
-        return settings.geodb_host
 
     async def search_places(self, query: str, limit: int = 10) -> list[dict]:
         if not self._otm_key():
@@ -119,52 +112,6 @@ class PlacesService:
                 })
 
             return [p for p in places if p["name"] and p["name"] != "Unknown Place"]
-
-    async def get_autocomplete(self, query: str, limit: int = 8) -> list[dict]:
-        if not self._geodb_key() or not query or len(query) < 2:
-            return []
-
-        try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    f"{self.GEODB_BASE}/cities",
-                    params={
-                        "namePrefix": query, "limit": limit,
-                        "minPopulation": 1000, "sort": "-population",
-                        "languageCode": "en",
-                    },
-                    headers={
-                        "X-RapidAPI-Key": self._geodb_key(),
-                        "X-RapidAPI-Host": self._geodb_host(),
-                    },
-                )
-                data = resp.json()
-                cities = data.get("data", [])
-                if not cities:
-                    return []
-
-                results = []
-                for city in cities:
-                    pop = city.get("population", 0)
-                    city_type = "major_city" if pop > 1_000_000 else "city" if pop > 100_000 else "town" if pop > 10_000 else "place"
-                    location_parts = [p for p in [city.get("region"), city.get("country")] if p]
-                    location_desc = ", ".join(location_parts)
-
-                    results.append({
-                        "id": f"geodb_{city.get('id')}",
-                        "name": city.get("name", ""),
-                        "location": location_desc,
-                        "country": city.get("country", ""),
-                        "state": city.get("region", ""),
-                        "description": f"{city_type.replace('_', ' ').title()}{' in ' + location_desc if location_desc else ''}{' (pop. ' + format(pop, ',') + ')' if pop else ''}",
-                        "type": city_type,
-                        "coordinates": {"lat": city.get("latitude", 0), "lon": city.get("longitude", 0)},
-                        "searchTerms": [p for p in [city.get("name", "").lower(), city.get("country", "").lower(), city.get("region", "").lower()] if p],
-                        "population": pop,
-                    })
-                return results
-        except Exception:
-            return []
 
 
 places_service = PlacesService()

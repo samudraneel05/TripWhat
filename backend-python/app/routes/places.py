@@ -18,14 +18,6 @@ async def search_places(query: str = Query(...), limit: int = 10, _user=Depends(
     return places
 
 
-@router.get("/autocomplete")
-async def autocomplete(query: str = Query(...), limit: int = 8, _user=Depends(get_current_user)):
-    if not query or not query.strip():
-        raise HTTPException(status_code=400, detail="Query parameter is required")
-    suggestions = await places_service.get_autocomplete(query.strip(), limit)
-    return suggestions
-
-
 @router.get("/details")
 async def get_place_details(placeId: str = Query(...), _user=Depends(get_current_user)):
     """Get detailed place information including photos, reviews, hours, contact info,

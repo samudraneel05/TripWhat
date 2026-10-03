@@ -37,7 +37,6 @@ class SavedItemResponse(BaseModel):
 
 
 @router.get("")
-@router.get("/")
 async def list_saved_items(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -62,7 +61,6 @@ async def list_saved_items(
 
 
 @router.post("")
-@router.post("/")
 async def save_item(
     req: SaveItemRequest,
     user: User = Depends(get_current_user),

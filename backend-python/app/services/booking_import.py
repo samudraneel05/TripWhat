@@ -24,14 +24,6 @@ def _date_of(iso_str: str | None) -> str | None:
         return str(iso_str)[:10]
 
 
-def _airport_label(airport: dict | None) -> str:
-    if not airport:
-        return ""
-    name = airport.get("name") or ""
-    iata = airport.get("iata") or ""
-    return f"{name} ({iata})" if name and iata else name or iata
-
-
 def booking_to_flight_option(booking: dict) -> dict | None:
     """Convert a flight booking into a FlightOption dict."""
     details = booking.get("details") or {}

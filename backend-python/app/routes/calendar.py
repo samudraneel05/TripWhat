@@ -42,26 +42,4 @@ async def disconnect(user: User = Depends(get_current_user)):
     return {"disconnected": True, "hadConnection": disconnected}
 
 
-@router.get("/calendar/upcoming")
-async def upcoming_events(user: User = Depends(get_current_user)):
-    try:
-        events = await calendar_service.list_upcoming_events(str(user.id))
-        return {"events": events}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
-
-@router.post("/calendar/events")
-async def create_event(
-    payload: dict,
-    user: User = Depends(get_current_user),
-):
-    required = ["summary", "start", "end"]
-    for field in required:
-        if field not in payload:
-            raise HTTPException(status_code=400, detail=f"{field} is required")
-    try:
-        event = await calendar_service.create_event(str(user.id), payload)
-        return {"event": event}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))

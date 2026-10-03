@@ -1,14 +1,14 @@
-"""Trips routes — full CRUD + statistics + upcoming/completed."""
+"""Trips routes — CRUD + statistics."""
 
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.deps import get_current_user
 from app.models import Trip, User
-from app.schemas.trip import CreateTripRequest, UpdateTripRequest, MarkUpcomingRequest
+from app.schemas.trip import CreateTripRequest, UpdateTripRequest
 from app.services.checkpoint_sync import sync_trip_state_to_checkpoint
 from pydantic import BaseModel
 
@@ -49,7 +49,6 @@ def _trip_to_dict(trip: Trip) -> dict:
 
 
 @router.post("")
-@router.post("/")
 async def create_trip(
     req: CreateTripRequest,
     user: User = Depends(get_current_user),
@@ -96,7 +95,6 @@ async def create_trip(
 
 
 @router.get("")
-@router.get("/")
 async def list_trips(
     page: int = 1,
     limit: int = 10,
@@ -130,60 +128,6 @@ async def list_trips(
             "pages": (total + limit - 1) // limit,
             "total": total,
         },
-    }
-
-
-@router.get("/upcoming")
-async def list_upcoming(
-    page: int = 1,
-    limit: int = 10,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    query = select(Trip).where(
-        Trip.user_id == user.id,
-        Trip.is_upcoming == True,
-        Trip.is_completed != True,
-    ).order_by(Trip.trip_start_date.asc()).offset((page - 1) * limit).limit(limit)
-    result = await db.execute(query)
-    trips = result.scalars().all()
-
-    count_q = select(func.count(Trip.id)).where(
-        Trip.user_id == user.id,
-        Trip.is_upcoming == True,
-        Trip.is_completed != True,
-    )
-    total = (await db.execute(count_q)).scalar() or 0
-
-    return {
-        "upcomingTrips": [_trip_to_dict(t) for t in trips],
-        "pagination": {"current": page, "pages": (total + limit - 1) // limit, "total": total},
-    }
-
-
-@router.get("/completed")
-async def list_completed(
-    page: int = 1,
-    limit: int = 10,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    query = select(Trip).where(
-        Trip.user_id == user.id,
-        Trip.is_completed == True,
-    ).order_by(Trip.trip_end_date.desc()).offset((page - 1) * limit).limit(limit)
-    result = await db.execute(query)
-    trips = result.scalars().all()
-
-    count_q = select(func.count(Trip.id)).where(
-        Trip.user_id == user.id,
-        Trip.is_completed == True,
-    )
-    total = (await db.execute(count_q)).scalar() or 0
-
-    return {
-        "completedTrips": [_trip_to_dict(t) for t in trips],
-        "pagination": {"current": page, "pages": (total + limit - 1) // limit, "total": total},
     }
 
 
@@ -237,33 +181,6 @@ async def get_statistics(
             "nextTrip": {**_brief(next_trip[0]), "startDate": next_trip[0].trip_start_date.isoformat() if next_trip[0].trip_start_date else None} if next_trip else None,
         }
     }
-
-
-@router.get("/check")
-async def check_trip(
-    startDate: str = Query(...),
-    cities: str = Query(...),
-    people: int = Query(...),
-    travelType: str = Query(...),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    import json
-    city_names = [c["name"] for c in json.loads(cities)]
-    result = await db.execute(
-        select(Trip).where(
-            Trip.user_id == user.id,
-            Trip.start_date == _parse_iso(startDate),
-            Trip.people == people,
-            Trip.travel_type == travelType,
-        )
-    )
-    trips = result.scalars().all()
-    for trip in trips:
-        trip_city_names = [c.get("name") for c in (trip.cities or [])]
-        if any(cn in trip_city_names for cn in city_names):
-            return {"isSaved": True, "savedTrip": _trip_to_dict(trip)}
-    return {"isSaved": False, "savedTrip": None}
 
 
 @router.get("/{trip_id}")
@@ -383,65 +300,6 @@ async def import_booking(
         await sync_trip_state_to_checkpoint(trip.conversation_id, update)
     await db.refresh(trip)
     return {"message": message, "savedTrip": _trip_to_dict(trip), "tripState": trip.trip_state}
-
-
-@router.put("/{trip_id}/upcoming")
-async def mark_upcoming(
-    trip_id: int,
-    req: MarkUpcomingRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(Trip).where(Trip.id == trip_id, Trip.user_id == user.id))
-    trip = result.scalar_one_or_none()
-    if not trip:
-        raise HTTPException(status_code=404, detail="Saved trip not found")
-
-    start = _parse_iso(req.tripStartDate)
-    end = start + timedelta(days=trip.total_days or 1)
-    trip.is_upcoming = True
-    trip.is_completed = False
-    trip.trip_start_date = start.date()
-    trip.trip_end_date = end.date()
-    await db.commit()
-    await db.refresh(trip)
-    return {"message": "Trip marked as upcoming successfully", "savedTrip": _trip_to_dict(trip)}
-
-
-@router.put("/{trip_id}/completed")
-async def mark_completed(
-    trip_id: int,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(Trip).where(Trip.id == trip_id, Trip.user_id == user.id))
-    trip = result.scalar_one_or_none()
-    if not trip:
-        raise HTTPException(status_code=404, detail="Saved trip not found")
-    trip.is_completed = True
-    trip.trip_end_date = datetime.now(timezone.utc).date()
-    await db.commit()
-    await db.refresh(trip)
-    return {"message": "Trip marked as completed successfully", "savedTrip": _trip_to_dict(trip)}
-
-
-@router.delete("/{trip_id}/upcoming")
-async def remove_upcoming(
-    trip_id: int,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(Trip).where(Trip.id == trip_id, Trip.user_id == user.id))
-    trip = result.scalar_one_or_none()
-    if not trip:
-        raise HTTPException(status_code=404, detail="Saved trip not found")
-    trip.is_upcoming = False
-    trip.is_completed = False
-    trip.trip_start_date = None
-    trip.trip_end_date = None
-    await db.commit()
-    await db.refresh(trip)
-    return {"message": "Trip moved back to saved successfully", "savedTrip": _trip_to_dict(trip)}
 
 
 @router.delete("/{trip_id}")
