@@ -35,14 +35,20 @@ export function SearchResults({ data, text, onSelectPlace }: SearchResultsProps)
         className="text-sm text-[var(--ink)] leading-relaxed space-y-1.5"
       />
 
-      {/* Postcard grid — card numbers match the map's search pins */}
+      {/* Postcard strip — horizontal snap-scroll; card numbers match the
+          map's search pins. Fixed width keeps ~2.5 cards visible as the
+          scroll affordance. */}
       {places.length > 0 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <div className="flex gap-2.5 overflow-x-auto pb-1.5 -mx-1 px-1 snap-x snap-mandatory
+                        [&::-webkit-scrollbar]:h-1
+                        [&::-webkit-scrollbar-thumb]:bg-[var(--border)]
+                        [&::-webkit-scrollbar-thumb]:rounded-full
+                        [&::-webkit-scrollbar-track]:bg-transparent">
           {places.map((p, i) => (
             <button
               key={p.placeId || i}
               onClick={() => p.placeId && onSelectPlace?.(p.placeId)}
-              className="group text-left rounded-lg overflow-hidden border border-[var(--border)] bg-[var(--surface)] transition-shadow duration-200 hover:shadow-md active:scale-[0.98] active:transition-transform"
+              className="group shrink-0 w-[172px] snap-start text-left rounded-lg overflow-hidden border border-[var(--border)] bg-[var(--surface)] transition-shadow duration-200 hover:shadow-md active:scale-[0.98] active:transition-transform"
             >
               <div className="relative aspect-[4/3] bg-[var(--sage)]">
                 {p.imageUrl ? (
