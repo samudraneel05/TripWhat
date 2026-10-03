@@ -496,3 +496,66 @@ async def test_search_tools_tool_returns_catalog_matches(agent):
     search_tool = next(t for t in agent._tools if t.name == "search_tools")
     out = await search_tool.ainvoke({"query": "email bookings"})
     assert "get_email_bookings" in out
+
+
+def test_search_results_widget_includes_normalized_coordinates(agent):
+    trip_state = create_default_trip_state()
+    search_results = [
+        {
+            "placeId": "p1",
+            "name": "Brandenburg Gate",
+            "address": "Pariser Platz, Berlin",
+            "rating": 4.7,
+            "types": ["tourist_attraction"],
+            "coordinates": {"lat": 52.5163, "lon": 13.3777},
+        },
+        {
+            "placeId": "p2",
+            "name": "Berlin TV Tower",
+            "address": "Panoramastraße, Berlin",
+            "rating": 4.4,
+            "types": ["point_of_interest"],
+            "coordinates": {"lat": 52.5208, "lng": 13.4094},
+        },
+        {
+            "placeId": "p3",
+            "name": "Some coord-less place",
+            "rating": 4.0,
+        },
+    ]
+    widgets = agent._build_widgets(trip_state, search_results)
+    sr = next(w for w in widgets if w["type"] == "search_results")
+    places = {p["placeId"]: p for p in sr["data"]["places"]}
+    assert places["p1"]["coordinates"] == {"lat": 52.5163, "lng": 13.3777}
+    assert places["p2"]["coordinates"] == {"lat": 52.5208, "lng": 13.4094}
+    assert places["p3"]["coordinates"] is None
+
+
+def test_viator_normalize_maps_product_shape():
+    from app.services.viator_service import ViatorService
+
+    product = {
+        "productCode": "100AA1",
+        "title": "Berlin Highlights Walking Tour",
+        "images": [{"variants": [{"url": "https://x/s.jpg", "width": 100},
+                                 {"url": "https://x/l.jpg", "width": 800}]}],
+        "reviews": {"combinedAverageRating": 4.8, "totalReviews": 1320},
+        "pricing": {"summary": {"fromPrice": 29.0, "currencyCode": "USD"}},
+        "productUrl": "https://www.viator.com/tours/x/100AA1",
+    }
+    out = ViatorService._normalize(product)
+    assert out["productCode"] == "100AA1"
+    assert out["imageUrl"] == "https://x/l.jpg"
+    assert out["rating"] == 4.8
+    assert out["reviewCount"] == 1320
+    assert out["fromPrice"] == 29.0
+    assert out["currency"] == "USD"
+
+
+async def test_viator_search_activities_empty_without_key():
+    from app.services.viator_service import ViatorService
+
+    svc = ViatorService()
+    with patch("app.services.viator_service.settings") as s:
+        s.viator_api_key = ""
+        assert await svc.search_activities("Brandenburg Gate", "Berlin") == []

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     langsmith_project: str = "tripwhat-agent"
     langsmith_workspace_id: str = ""
 
+    # Viator Partner API (tours & activities — free affiliate tier)
+    viator_api_key: str = ""
+    viator_base_url: str = "https://api.sandbox.viator.com/partner"
+
     # JWT
     jwt_secret: str = "fallback-secret"
     jwt_expires_in_days: int = 7

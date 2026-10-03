@@ -134,6 +134,18 @@ async def get_place_details(placeId: str = Query(...), _user=Depends(get_current
         "alternates": alternates,
     }
 
+    # Viator tours & activities mentioning this place (empty when unconfigured)
+    try:
+        from app.services.viator_service import viator_service
+
+        city_hint = locality or country or None
+        result["activities"] = await viator_service.search_activities(
+            details.get("name", ""), city_hint, limit=6
+        )
+    except Exception as e:
+        logger.warning(f"[PLACES] Viator activities failed for placeId={placeId}: {e}")
+        result["activities"] = []
+
     logger.info(
         f"[PLACES] Details for placeId={placeId} → {len(photo_urls)} photos, "
         f"{len(reviews)} reviews, {len(alternates)} alternates"

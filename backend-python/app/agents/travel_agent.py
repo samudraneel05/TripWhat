@@ -1048,6 +1048,9 @@ class TravelAgent:
                 if not name or pid in seen_ids:
                     continue
                 seen_ids.add(pid)
+                raw_coords = p.get("coordinates") or {}
+                lat = raw_coords.get("lat")
+                lng = raw_coords.get("lng") if raw_coords.get("lng") is not None else raw_coords.get("lon")
                 places.append({
                     "name": name,
                     "placeId": pid,
@@ -1055,6 +1058,10 @@ class TravelAgent:
                     "rating": p.get("rating"),
                     "type": ", ".join((p.get("types") or [])[:2]),
                     "address": p.get("address", ""),
+                    "coordinates": (
+                        {"lat": lat, "lng": lng}
+                        if lat is not None and lng is not None else None
+                    ),
                 })
                 if len(places) >= 8:
                     break
