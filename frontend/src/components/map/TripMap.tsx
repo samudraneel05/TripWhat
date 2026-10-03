@@ -322,10 +322,13 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
         const dayNum =
           (p.placeId && committed.get(p.placeId)) ??
           committed.get(`n:${p.name.toLowerCase().trim()}`);
+        // Mapbox owns the marker element's transform (positioning) — all
+        // our styling, including hover lift, goes on an inner element.
         const el = document.createElement('div');
+        const inner = document.createElement('div');
         if (dayNum != null) {
           const dayColor = MARKER_COLORS[((dayNum || 1) - 1) % MARKER_COLORS.length];
-          el.style.cssText = `
+          inner.style.cssText = `
             height: 24px; border-radius: 999px; padding: 0 8px 0 5px;
             background: ${dayColor}; border: 2px solid #fff;
             box-shadow: 0 1px 3px rgba(0,0,0,0.25);
@@ -333,9 +336,9 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
             font-size: 11px; color: #fff; font-weight: 700;
             transition: transform 150ms ease-out, box-shadow 150ms ease-out;
           `;
-          el.innerHTML = `${pinIconSvg(kind.icon, 12)}<span>${dayNum}</span>`;
+          inner.innerHTML = `${pinIconSvg(kind.icon, 12)}<span>${dayNum}</span>`;
         } else {
-          el.style.cssText = `
+          inner.style.cssText = `
             width: 26px; height: 26px; border-radius: 8px;
             background: ${kind.color}; border: 2px solid #fff;
             box-shadow: 0 1px 3px rgba(0,0,0,0.25);
@@ -343,8 +346,9 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
             justify-content: center; color: #fff;
             transition: transform 150ms ease-out, box-shadow 150ms ease-out;
           `;
-          el.innerHTML = pinIconSvg(kind.icon, 14);
+          inner.innerHTML = pinIconSvg(kind.icon, 14);
         }
+        el.appendChild(inner);
         const popup = new mapboxgl.Popup({ offset: 14, closeButton: false, closeOnClick: false });
         popup.setHTML(
           `<div style="font-family: Inter, sans-serif; padding: 4px 2px; max-width: 200px;">
@@ -358,11 +362,11 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
           .setLngLat([p.coordinates!.lng, p.coordinates!.lat])
           .setPopup(popup)
           .addTo(map);
-        el.addEventListener('mouseenter', () => popup.addTo(map));
-        el.addEventListener('mouseleave', () => popup.remove());
-        el.addEventListener('click', () => onSelectSearchPlace?.(p.placeId));
+        inner.addEventListener('mouseenter', () => popup.addTo(map));
+        inner.addEventListener('mouseleave', () => popup.remove());
+        inner.addEventListener('click', () => onSelectSearchPlace?.(p.placeId));
         searchMarkersRef.current.push(marker);
-        if (p.placeId) searchPinElsRef.current.set(p.placeId, el);
+        if (p.placeId) searchPinElsRef.current.set(p.placeId, inner);
         bounds.extend([p.coordinates!.lng, p.coordinates!.lat]);
       });
 
