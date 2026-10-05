@@ -84,3 +84,5 @@ export const gmailApi = {
   importBooking: (tripId: string | number, booking: any) =>
     api.post(`/api/saved-trips/${tripId}/import-booking`, { booking }),
 };
+
+export default api;

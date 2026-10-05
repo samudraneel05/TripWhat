@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { io, type Socket } from 'socket.io-client';
 import { useChatStore, serializeMessages } from './chatStore';
-import { chatApi, itineraryEditApi } from '../lib/api';
+import api, { chatApi, itineraryEditApi } from '../lib/api';
 import { prefetchImages, extractImageUrls } from '../lib/image';
 
 const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || 'http://localhost:5000';
@@ -99,8 +99,9 @@ interface TripStore {
   setSearchPlaces: (places: SearchPlace[] | null, conversationId?: string | null) => void;
 }
 
+// Socket auth still reads the token directly — HTTP goes through the
+// shared axios instance (auth header + 401 handling built in).
 const getToken = () => localStorage.getItem('tripwhat_token');
-const API_URL = import.meta.env.VITE_API_URL || '';
 
 export const useTripStore = create<TripStore>((set, get) => ({
   trips: [],
@@ -121,28 +122,20 @@ export const useTripStore = create<TripStore>((set, get) => ({
   fetchTrips: async () => {
     set({ loading: true, error: null });
     try {
-      const token = getToken();
-      const res = await fetch(`${API_URL}/api/saved-trips?limit=100`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`Failed to fetch trips (${res.status})`);
-      const data = await res.json();
+      const res = await api.get('/api/saved-trips', { params: { limit: 100 } });
+      const data = res.data;
       const tripsList = Array.isArray(data) ? data : Array.isArray(data.savedTrips) ? data.savedTrips : Array.isArray(data.trips) ? data.trips : [];
       set({ trips: tripsList, loading: false });
     } catch (err: any) {
-      set({ error: err.message, loading: false });
+      set({ error: err.response?.data?.message || err.message, loading: false });
     }
   },
 
   fetchTrip: async (id: string) => {
     set({ loading: true, error: null });
     try {
-      const token = getToken();
-      const res = await fetch(`${API_URL}/api/saved-trips/${id}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`Failed to fetch trip (${res.status})`);
-      const data = await res.json();
+      const res = await api.get(`/api/saved-trips/${id}`);
+      const data = res.data;
       set({ tripState: data.tripState ?? null, loading: false });
       // Unconditional restore: a trip with no linked conversation must clear
       // whatever conversation the store held — otherwise the previous
@@ -180,7 +173,6 @@ export const useTripStore = create<TripStore>((set, get) => ({
   createTrip: async (data: Partial<Trip>) => {
     set({ loading: true, error: null });
     try {
-      const token = getToken();
       const ts = (data.tripState || {}) as TripState;
       const { messages, conversationId } = useChatStore.getState();
       const payload = {
@@ -196,16 +188,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
         chatHistory: serializeMessages(messages),
         conversationId: conversationId,
       };
-      const res = await fetch(`${API_URL}/api/saved-trips`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`Failed to create trip (${res.status})`);
-      const result = await res.json();
+      const res = await api.post('/api/saved-trips', payload);
+      const result = res.data;
       const trip = result.savedTrip || result;
       set({ tripState: trip.tripState || ts, loading: false });
       return trip;
@@ -217,7 +201,6 @@ export const useTripStore = create<TripStore>((set, get) => ({
 
   updateTrip: async (id: string, data: Partial<Trip>) => {
     try {
-      const token = getToken();
       const { messages, conversationId } = useChatStore.getState();
       const payload = { ...data };
       // Only inject the store's chat history/link when they're non-empty —
@@ -226,16 +209,8 @@ export const useTripStore = create<TripStore>((set, get) => ({
       const serialized = serializeMessages(messages);
       if (serialized.length) payload.chatHistory = serialized;
       if (conversationId) payload.conversationId = conversationId;
-      const res = await fetch(`${API_URL}/api/saved-trips/${id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
-      });
-      if (!res.ok) throw new Error(`Failed to update trip (${res.status})`);
-      const result = await res.json();
+      const res = await api.put(`/api/saved-trips/${id}`, payload);
+      const result = res.data;
       const updated = result.savedTrip || result;
       set({ tripState: updated.tripState });
     } catch (err: any) {
@@ -245,12 +220,7 @@ export const useTripStore = create<TripStore>((set, get) => ({
 
   deleteTrip: async (id: string) => {
     try {
-      const token = getToken();
-      const res = await fetch(`${API_URL}/api/saved-trips/${id}`, {
-        method: 'DELETE',
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) throw new Error(`Failed to delete trip (${res.status})`);
+      await api.delete(`/api/saved-trips/${id}`);
       set((s) => ({ trips: s.trips.filter((t) => String(t.id) !== id) }));
     } catch (err: any) {
       set({ error: err.message });
