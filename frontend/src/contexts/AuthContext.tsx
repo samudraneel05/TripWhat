@@ -1,10 +1,44 @@
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
 import { useTripStore } from "../stores/tripStore";
+import api from "../lib/api";
 
-const AuthContext = createContext(null);
+export interface UserPreferences {
+  budget?: string;
+  travelStyle?: string;
+  interests?: string[];
+  [key: string]: unknown;
+}
 
-export function AuthProvider({ children }) {
-  const [user, setUser] = useState(null);
+export interface User {
+  id: number | string;
+  name: string;
+  email: string;
+  bio?: string;
+  avatarUrl?: string;
+  preferences?: UserPreferences;
+  [key: string]: unknown;
+}
+
+interface AuthContextValue {
+  user: User | null;
+  login: (email: string, password: string) => Promise<User>;
+  signup: (email: string, password: string, userData: { name: string }) => Promise<void>;
+  logout: () => void;
+  updateUser: (updatedUserData: Partial<User>) => void;
+  loginWithToken: (token: string) => Promise<User | null>;
+  loading: boolean;
+  isAuthenticated: boolean;
+}
+
+const AuthContext = createContext<AuthContextValue | null>(null);
+
+const errMessage = (err: unknown, fallback: string): string => {
+  const data = (err as any)?.response?.data;
+  return (typeof data?.detail === "string" && data.detail) || data?.message || fallback;
+};
+
+export function AuthProvider({ children }: { children: ReactNode }) {
+  const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -17,112 +51,45 @@ export function AuthProvider({ children }) {
     }
   }, []);
 
-  const fetchUser = async () => {
+  const fetchUser = async (): Promise<User | null> => {
     try {
-      const API_URL = import.meta.env.VITE_API_URL || "";
-      const token = localStorage.getItem("tripwhat_token");
-
-      console.log(
-        "[AUTH] Fetching user with token:",
-        token ? "Token found" : "No token"
-      );
-
-      const response = await fetch(`${API_URL}/api/auth/me`, {
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-      });
-
-      console.log("[AUTH] Fetch user response:", response.status);
-
-      if (response.ok) {
-        const data = await response.json();
-        console.log("[AUTH] User data received:", data);
-        // Backend returns { user: { id, name, email } }
-        setUser(data.user);
-        return data.user;
-      } else {
-        console.log(
-          "[AUTH] Token validation failed with status:",
-          response.status
-        );
-        const errorData = await response
-          .json()
-          .catch(() => ({ message: "Unknown error" }));
-        console.log("[AUTH] Error details:", errorData);
-        localStorage.removeItem("tripwhat_token");
-      }
-    } catch (error) {
-      console.error("[AUTH] Failed to fetch user:", error);
+      // Backend returns { user: { id, name, email } }
+      const res = await api.get("/api/auth/me");
+      setUser(res.data.user);
+      return res.data.user;
+    } catch {
       localStorage.removeItem("tripwhat_token");
+      return null;
     } finally {
       setLoading(false);
     }
-    return null;
   };
 
-  const login = async (email, password) => {
-    const API_URL = import.meta.env.VITE_API_URL || "";
-
-    console.log("[AUTH] Attempting login for email:", email);
-
-    const response = await fetch(`${API_URL}/api/auth/login`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ email, password }),
-    });
-
-    console.log("[AUTH] Login response:", response.status);
-
-    if (!response.ok) {
-      const error = await response.json();
-      console.error("[AUTH] Login failed:", error);
-      throw new Error(
-        typeof error.detail === "string" ? error.detail : error.message || "Login failed"
-      );
+  const login = async (email: string, password: string): Promise<User> => {
+    try {
+      const res = await api.post("/api/auth/login", { email, password });
+      const { token, user } = res.data;
+      localStorage.setItem("tripwhat_token", token);
+      setUser(user);
+      return user; // So login page can handle redirect
+    } catch (err) {
+      throw new Error(errMessage(err, "Login failed"));
     }
-
-    const { token, user } = await response.json();
-    console.log("[AUTH] Login successful, storing token and user:", {
-      token: !!token,
-      user,
-    });
-
-    localStorage.setItem("tripwhat_token", token);
-    setUser(user);
-
-    return user; // Return user data so login page can handle redirect
   };
 
-  const signup = async (email, password, userData) => {
-    const API_URL = import.meta.env.VITE_API_URL || "";
-
-    const response = await fetch(`${API_URL}/api/auth/register`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ 
-        name: userData.name, 
-        email, 
-        password 
-      }),
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new Error(
-        typeof error.detail === "string" ? error.detail : error.message || "Signup failed"
-      );
+  const signup = async (email: string, password: string, userData: { name: string }): Promise<void> => {
+    try {
+      const res = await api.post("/api/auth/register", {
+        name: userData.name,
+        email,
+        password,
+      });
+      const { token, user } = res.data;
+      localStorage.setItem("tripwhat_token", token);
+      setUser(user);
+    } catch (err) {
+      throw new Error(errMessage(err, "Signup failed"));
     }
-
-    const { token, user } = await response.json();
-
-    localStorage.setItem("tripwhat_token", token);
-    setUser(user);
   };
 
   const logout = () => {
@@ -135,19 +102,16 @@ export function AuthProvider({ children }) {
   // and fetches the user so ProtectedRoute sees a logged-in session — the
   // mount-time token check in the effect above races with children that
   // store the token in their own effects, so we do it explicitly here.
-  const loginWithToken = async (token) => {
+  const loginWithToken = async (token: string): Promise<User | null> => {
     localStorage.setItem("tripwhat_token", token);
     return await fetchUser();
   };
 
-  const updateUser = (updatedUserData) => {
-    setUser(prev => ({
-      ...prev,
-      ...updatedUserData
-    }));
+  const updateUser = (updatedUserData: Partial<User>) => {
+    setUser(prev => (prev ? { ...prev, ...updatedUserData } : prev));
   };
 
-  const value = {
+  const value: AuthContextValue = {
     user,
     login,
     signup,
@@ -161,7 +125,7 @@ export function AuthProvider({ children }) {
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-export const useAuth = () => {
+export const useAuth = (): AuthContextValue => {
   const context = useContext(AuthContext);
   if (!context) {
     throw new Error("useAuth must be used within AuthProvider");

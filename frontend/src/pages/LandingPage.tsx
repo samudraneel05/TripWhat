@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import React, { useRef, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { Compass, ArrowUp, ArrowUpRight, ArrowRight, MapPin, Play, Sparkles, Bookmark, SlidersHorizontal, Plane, BedDouble, Utensils, Check, Plus } from "lucide-react";
 import { useAuth } from "../contexts/AuthContext";
@@ -17,22 +17,22 @@ const SUGGESTIONS = [
 ];
 
 const GLOBE_DESTINATIONS = [
-  { ...SUGGESTIONS[0], coordinates: [2.35, 48.86] },
-  { ...SUGGESTIONS[1], coordinates: [139.69, 35.69] },
-  { ...SUGGESTIONS[2], coordinates: [115.2, -8.4] },
-  { ...SUGGESTIONS[3], coordinates: [-19, 64.8] },
-  { label: "New York", img: "https://images.unsplash.com/photo-1496442226666-8d4d0e62e6e9?w=200&h=200&fit=crop", coordinates: [-74, 40.71] },
-  { label: "Coastal escapes", img: "/coastal-road-trip-scenic-view.jpg", coordinates: [-155.6, 19.9] },
-  { label: "Mountain stays", img: "/mountain-hotel-stay.jpg", coordinates: [10.5, 46.7] },
-  { label: "Market mornings", img: "/local-food-market.jpg", coordinates: [-9.14, 38.72] },
-  { label: "Rio", img: "https://images.unsplash.com/photo-1772603503638-74ca65f96589?w=200&h=200&fit=crop&auto=format", coordinates: [-43.2, -22.9] },
-  { label: "Sydney", img: "https://images.unsplash.com/photo-1506973035872-a4ec16b8e8d9?w=200&h=200&fit=crop&auto=format", coordinates: [151.2, -33.9] },
-  { label: "Cape Town", img: "https://images.unsplash.com/photo-1724136620561-99a60d12f98b?w=200&h=200&fit=crop&auto=format", coordinates: [18.4, -33.9] },
-  { label: "Buenos Aires", img: "https://images.unsplash.com/photo-1486325212027-8081e485255e?w=200&h=200&fit=crop&auto=format", coordinates: [-58.4, -34.6] },
-  { label: "Lima", img: "https://images.unsplash.com/photo-1660521844005-015733ce411e?w=200&h=200&fit=crop&auto=format", coordinates: [-77.0, -12.0] },
-  { label: "Jaipur", img: "https://images.unsplash.com/photo-1605649487212-47bdab064df7?w=200&h=200&fit=crop&auto=format", coordinates: [75.8, 26.9] },
-  { label: "Marrakech", img: "https://images.unsplash.com/photo-1517760444937-f6397edcbbcd?w=200&h=200&fit=crop&auto=format", coordinates: [-8.0, 31.6] },
-  { label: "Nairobi", img: "https://images.unsplash.com/photo-1741991110666-88115e724741?w=200&h=200&fit=crop&auto=format", coordinates: [36.8, -1.3] },
+  { ...SUGGESTIONS[0], coordinates: [2.35, 48.86] as [number, number] },
+  { ...SUGGESTIONS[1], coordinates: [139.69, 35.69] as [number, number] },
+  { ...SUGGESTIONS[2], coordinates: [115.2, -8.4] as [number, number] },
+  { ...SUGGESTIONS[3], coordinates: [-19, 64.8] as [number, number] },
+  { label: "New York", img: "https://images.unsplash.com/photo-1496442226666-8d4d0e62e6e9?w=200&h=200&fit=crop", coordinates: [-74, 40.71] as [number, number] },
+  { label: "Coastal escapes", img: "/coastal-road-trip-scenic-view.jpg", coordinates: [-155.6, 19.9] as [number, number] },
+  { label: "Mountain stays", img: "/mountain-hotel-stay.jpg", coordinates: [10.5, 46.7] as [number, number] },
+  { label: "Market mornings", img: "/local-food-market.jpg", coordinates: [-9.14, 38.72] as [number, number] },
+  { label: "Rio", img: "https://images.unsplash.com/photo-1772603503638-74ca65f96589?w=200&h=200&fit=crop&auto=format", coordinates: [-43.2, -22.9] as [number, number] },
+  { label: "Sydney", img: "https://images.unsplash.com/photo-1506973035872-a4ec16b8e8d9?w=200&h=200&fit=crop&auto=format", coordinates: [151.2, -33.9] as [number, number] },
+  { label: "Cape Town", img: "https://images.unsplash.com/photo-1724136620561-99a60d12f98b?w=200&h=200&fit=crop&auto=format", coordinates: [18.4, -33.9] as [number, number] },
+  { label: "Buenos Aires", img: "https://images.unsplash.com/photo-1486325212027-8081e485255e?w=200&h=200&fit=crop&auto=format", coordinates: [-58.4, -34.6] as [number, number] },
+  { label: "Lima", img: "https://images.unsplash.com/photo-1660521844005-015733ce411e?w=200&h=200&fit=crop&auto=format", coordinates: [-77.0, -12.0] as [number, number] },
+  { label: "Jaipur", img: "https://images.unsplash.com/photo-1605649487212-47bdab064df7?w=200&h=200&fit=crop&auto=format", coordinates: [75.8, 26.9] as [number, number] },
+  { label: "Marrakech", img: "https://images.unsplash.com/photo-1517760444937-f6397edcbbcd?w=200&h=200&fit=crop&auto=format", coordinates: [-8.0, 31.6] as [number, number] },
+  { label: "Nairobi", img: "https://images.unsplash.com/photo-1741991110666-88115e724741?w=200&h=200&fit=crop&auto=format", coordinates: [36.8, -1.3] as [number, number] },
 ];
 
 const STARTERS = [
@@ -51,26 +51,27 @@ export default function LandingPage() {
   const [query, setQuery] = useState("");
   const { isAuthenticated, loading } = useAuth();
   const navigate = useNavigate();
-  const composerRef = useRef(null);
-  const heroRef = useRef(null);
-  const [animationPaused, setAnimationPaused] = useState(false);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const heroRef = useRef<HTMLDivElement>(null);
+  const [animationPaused] = useState(false);
   const [promptFocused, setPromptFocused] = useState(false);
   const { running, reducedMotion } = useHeroAnimation(heroRef, animationPaused || promptFocused || query.length > 0);
   const scrollRef = useScrollReveal();
 
-  const startTrip = (prompt) => {
+  const startTrip = (prompt: string) => {
     const message = prompt.trim();
     if (!message || loading) return;
     navigate(`${isAuthenticated ? "/new" : "/signup"}?q=${encodeURIComponent(message)}`);
   };
 
-  const handleSubmit = (event) => {
+  const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     startTrip(query);
   };
 
-  const handleSuggestion = (label) => {
+  const handleSuggestion = (label: string) => {
     const destination = SUGGESTIONS.find((suggestion) => suggestion.label === label);
+    if (!destination) return;
     startTrip(`Plan a ${destination.days.replace(" days", "-day")} trip to ${label}`);
   };
 

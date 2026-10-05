@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type RefObject } from "react";
 
-export function useHeroAnimation(containerRef, paused) {
+export function useHeroAnimation(containerRef: RefObject<HTMLElement | null>, paused: boolean) {
   const [running, setRunning] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(true);
 

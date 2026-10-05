@@ -5,7 +5,7 @@ import { useAuth } from "../contexts/AuthContext";
 import { AuthImagePanel } from "../components/landing/AuthImagePanel";
 import "./AuthPage.css";
 
-const GOOGLE_ERRORS = {
+const GOOGLE_ERRORS: Record<string, string> = {
   google_signin_failed: "Google sign-in failed. Please try again.",
   google_unverified: "Google couldn't verify this email.",
   google_account_exists: "An account with this email already exists. Log in with your password.",
@@ -41,17 +41,18 @@ export default function LoginPage() {
   }, [navigate, isAuthenticated, loading, postAuthPath]);
 
   useEffect(() => {
-    const message = GOOGLE_ERRORS[searchParams.get("error")];
+    const err = searchParams.get("error");
+    const message = err ? GOOGLE_ERRORS[err] : undefined;
     if (message) setError(message);
   }, [searchParams]);
 
-  const handleChange = (e) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
     if (error) setError("");
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
@@ -60,7 +61,7 @@ export default function LoginPage() {
       const user = await login(formData.email, formData.password);
       if (user) navigate(postAuthPath, { replace: true });
     } catch (err) {
-      setError(err.message || "Login failed");
+      setError(err instanceof Error ? err.message : "Login failed");
     } finally {
       setIsLoading(false);
     }

@@ -8,22 +8,22 @@ import {
 } from "react-router-dom";
 import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
-import { lazy, Suspense } from "react";
-import { AuthProvider, useAuth } from "./contexts/AuthContext.jsx";
+import React, { lazy, Suspense } from "react";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
 
-import AppLayout from "./components/AppLayout.tsx";
-import LandingPage from "./pages/LandingPage.jsx";
-import LoginPage from "./pages/LoginPage.jsx";
-import SignupPage from "./pages/SignupPage.jsx";
+import AppLayout from "./components/AppLayout";
+import LandingPage from "./pages/LandingPage";
+import LoginPage from "./pages/LoginPage";
+import SignupPage from "./pages/SignupPage";
 
 // App pages are lazy-loaded — the workspace pulls in mapbox + the whole
 // itinerary UI, which shouldn't ship in the landing bundle.
-const TripsPage = lazy(() => import("./pages/TripsPage.tsx"));
-const ChatsPage = lazy(() => import("./pages/ChatsPage.tsx"));
-const TripWorkspacePage = lazy(() => import("./pages/TripWorkspacePage.tsx"));
-const NewTripPage = lazy(() => import("./pages/NewTripPage.tsx"));
-const ProfilePage = lazy(() => import("./pages/ProfilePage.jsx"));
-const GoogleAuthSuccess = lazy(() => import("./pages/GoogleAuthSuccess.jsx"));
+const TripsPage = lazy(() => import("./pages/TripsPage"));
+const ChatsPage = lazy(() => import("./pages/ChatsPage"));
+const TripWorkspacePage = lazy(() => import("./pages/TripWorkspacePage"));
+const NewTripPage = lazy(() => import("./pages/NewTripPage"));
+const ProfilePage = lazy(() => import("./pages/ProfilePage"));
+const GoogleAuthSuccess = lazy(() => import("./pages/GoogleAuthSuccess"));
 
 function PageFallback() {
   return (
@@ -33,7 +33,7 @@ function PageFallback() {
   );
 }
 
-function ProtectedRoute({ children }) {
+function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
   const location = useLocation();
 

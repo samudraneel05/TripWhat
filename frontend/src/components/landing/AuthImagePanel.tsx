@@ -28,12 +28,11 @@ const SCENES = [
   },
 ];
 
-const CROSSFADE_MS = 900;
 const INTERVAL_MS = 9000;
 
 export function AuthImagePanel() {
   const [index, setIndex] = useState(0);
-  const timerRef = useRef(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const reducedMotion = useRef(
     typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches,
   );
@@ -43,7 +42,7 @@ export function AuthImagePanel() {
     timerRef.current = setInterval(() => {
       setIndex((prev) => (prev + 1) % SCENES.length);
     }, INTERVAL_MS);
-    return () => clearInterval(timerRef.current);
+    return () => { if (timerRef.current) clearInterval(timerRef.current); };
   }, []);
 
   return (

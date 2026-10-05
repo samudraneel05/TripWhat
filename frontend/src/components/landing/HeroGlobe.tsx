@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
+import type { GeoPermissibleObjects, GeoPath } from "d3-geo";
 import { geoDistance, geoOrthographic, geoPath } from "d3-geo";
 import { feature } from "topojson-client";
 import landTopology from "world-atlas/land-110m.json";
@@ -9,8 +10,23 @@ import "./HeroGlobe.css";
 
 gsap.registerPlugin(ScrollTrigger, useGSAP);
 
-const LAND = feature(landTopology, landTopology.objects.land);
-const EMPTY_DESTINATIONS = [];
+interface Destination {
+  label: string;
+  coordinates: [number, number];
+  img: string;
+}
+
+interface DragState {
+  pointerId: number;
+  lastX: number;
+  lastY: number;
+  lastTime: number;
+  velocityX: number;
+  velocityY: number;
+}
+
+const LAND = feature(landTopology as any, (landTopology as any).objects.land) as GeoPermissibleObjects;
+const EMPTY_DESTINATIONS: Destination[] = [];
 const INITIAL_LONGITUDE = -12;
 const INITIAL_TILT = -20;
 const FALLBACK_PATH = geoPath(
@@ -23,7 +39,7 @@ const MAX_TILT = 78;
 const RESUME_DELAY = 1200;
 const SPIN_DURATION = 82;
 
-function cardPlacement([longitude, latitude], index) {
+function cardPlacement([longitude, latitude]: [number, number], index: number) {
   if (latitude > 58) return { offset: -36, lift: 14, angle: -7 };
   if (latitude < -28) return { offset: 34, lift: -18, angle: 8 };
   if (latitude > 35 && longitude > -15 && longitude < 6) return { offset: -86, lift: 18, angle: -5 };
@@ -31,14 +47,14 @@ function cardPlacement([longitude, latitude], index) {
   return { offset: index % 2 ? 28 : -28, lift: 20, angle: index % 2 ? 5 : -5 };
 }
 
-export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }) {
-  const wrapperRef = useRef(null);
-  const canvasRef = useRef(null);
-  const markerRefs = useRef([]);
+export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }: { running?: boolean; destinations?: Destination[] }) {
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const markerRefs = useRef<(HTMLDivElement | null)[]>([]);
   const rotationRef = useRef({ longitude: INITIAL_LONGITUDE, tilt: INITIAL_TILT });
   const runningRef = useRef(running);
-  const motionRef = useRef(null);
-  const dragStateRef = useRef(null);
+  const motionRef = useRef<(() => void) | null>(null);
+  const dragStateRef = useRef<DragState | null>(null);
   const points = useMemo(() => destinations
     .filter(({ coordinates }) => Array.isArray(coordinates)
       && coordinates.length === 2
@@ -59,21 +75,21 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
     const rotation = rotationRef.current;
     const markers = markerRefs.current.slice(0, points.length);
     const projection = geoOrthographic().clipAngle(90).precision(0.4);
-    let context;
+    let context: CanvasRenderingContext2D | null = null;
     let contextChecked = false;
-    let autoTween;
-    let inertiaTween;
-    let resumeTimeout;
+    let autoTween: gsap.core.Tween | null = null;
+    let inertiaTween: gsap.core.Tween | null = null;
+    let resumeTimeout: ReturnType<typeof setTimeout> | undefined;
     let width = 0;
     let height = 0;
     let radius = 0;
     let centerX = 0;
     let centerY = 0;
-    let ocean;
-    let continents;
-    let lighting;
+    let ocean: CanvasGradient | undefined;
+    let continents: CanvasGradient | undefined;
+    let lighting: CanvasGradient | undefined;
     let disposed = false;
-    let path;
+    let path: GeoPath;
 
     const syncMotion = () => {
       if (dragStateRef.current || inertiaTween) {
@@ -85,7 +101,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
     motionRef.current = syncMotion;
 
     const draw = () => {
-      if (disposed || !context || !width || !height) return;
+      if (disposed || !context || !width || !height || !ocean || !continents || !lighting || !path) return;
       projection.rotate([rotation.longitude, rotation.tilt]);
       context.clearRect(0, 0, width, height);
       context.save();
@@ -115,7 +131,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
       context.lineWidth = 1;
       context.stroke();
 
-      const viewCenter = projection.invert([centerX, centerY]);
+      const viewCenter = projection.invert?.([centerX, centerY]) ?? [0, 0] as [number, number];
       const responsiveScale = Math.min(1, Math.max(0.66, width / 760));
       points.forEach((destination, index) => {
         const marker = markers[index];
@@ -124,7 +140,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
         const visible = depth > 0.015;
         marker.style.visibility = visible ? "visible" : "hidden";
         if (!visible) return;
-        const [x, y] = projection(destination.coordinates);
+        const [x, y] = projection(destination.coordinates) ?? [0, 0];
         const scale = responsiveScale * (0.72 + depth * 0.28);
         marker.style.transform = `translate3d(${x.toFixed(2)}px, ${y.toFixed(2)}px, 0) scale(${scale.toFixed(3)})`;
         marker.style.opacity = String(Math.min(1, depth / 0.2) * (0.68 + depth * 0.32));
@@ -206,7 +222,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
     };
 
     /* ---- Full 2D drag-to-rotate with inertia ---- */
-    const onPointerDown = (event) => {
+    const onPointerDown = (event: PointerEvent) => {
       if (event.button !== undefined && event.button !== 0) return;
       canvas.setPointerCapture?.(event.pointerId);
       clearTimeout(resumeTimeout);
@@ -224,7 +240,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
       wrapper.dataset.dragging = "true";
     };
 
-    const onPointerMove = (event) => {
+    const onPointerMove = (event: PointerEvent) => {
       const drag = dragStateRef.current;
       if (!drag || event.pointerId !== drag.pointerId) return;
       const dx = event.clientX - drag.lastX;
@@ -241,7 +257,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
       draw();
     };
 
-    const endDrag = (event) => {
+    const endDrag = (event: PointerEvent) => {
       const drag = dragStateRef.current;
       if (!drag || event.pointerId !== drag.pointerId) return;
       canvas.releasePointerCapture?.(drag.pointerId);
@@ -299,7 +315,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
   return (
     <div className="hero-globe" ref={wrapperRef}>
       <div className="hero-globe-fallback" aria-hidden="true">
-        <svg viewBox="0 0 1000 1000" focusable="false"><path d={FALLBACK_PATH} /></svg>
+        <svg viewBox="0 0 1000 1000" focusable="false"><path d={FALLBACK_PATH ?? ""} /></svg>
       </div>
       <canvas
         ref={canvasRef}
@@ -324,7 +340,7 @@ export function HeroGlobe({ running = false, destinations = EMPTY_DESTINATIONS }
             <span className="hero-globe-dot" />
             <div
               className="hero-globe-card"
-              style={{ left: destination.offset, bottom: destination.lift, "--hero-globe-card-angle": `${destination.angle}deg` }}
+              style={{ left: destination.offset, bottom: destination.lift, "--hero-globe-card-angle": `${destination.angle}deg` } as React.CSSProperties}
             >
               <img src={destination.img} alt="" loading="lazy" decoding="async" draggable="false" />
               <span className="hero-globe-card-label">{destination.label}</span>

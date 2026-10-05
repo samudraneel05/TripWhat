@@ -8,7 +8,7 @@ const PROMPT_EXAMPLES = [
   "Take me on a scenic road trip through Iceland.",
 ];
 
-function createPromptCycle(element, prompts = PROMPT_EXAMPLES) {
+function createPromptCycle(element: HTMLElement, prompts: string[] = PROMPT_EXAMPLES) {
   const timeline = gsap.timeline({ paused: true, repeat: -1 });
   for (const prompt of prompts) {
     const characters = Array.from(prompt);
@@ -24,18 +24,18 @@ function createPromptCycle(element, prompts = PROMPT_EXAMPLES) {
   return timeline;
 }
 
-export function CyclingPrompt({ running, reducedMotion, hidden }) {
-  const containerRef = useRef(null);
-  const textRef = useRef(null);
-  const cycleRef = useRef(null);
+export function CyclingPrompt({ running, reducedMotion, hidden }: { running: boolean; reducedMotion: boolean; hidden: boolean }) {
+  const containerRef = useRef<HTMLSpanElement>(null);
+  const textRef = useRef<HTMLSpanElement>(null);
+  const cycleRef = useRef<gsap.core.Timeline | null>(null);
 
   useEffect(() => {
     if (reducedMotion) {
-      textRef.current.textContent = PROMPT_EXAMPLES[0];
+      if (textRef.current) textRef.current.textContent = PROMPT_EXAMPLES[0];
       return;
     }
     const context = gsap.context(() => {
-      cycleRef.current = createPromptCycle(textRef.current);
+      if (textRef.current) cycleRef.current = createPromptCycle(textRef.current);
     }, containerRef);
     return () => {
       context.revert();

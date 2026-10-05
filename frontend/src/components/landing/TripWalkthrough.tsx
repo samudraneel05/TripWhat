@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -58,20 +58,20 @@ const STOPS = [
   { name: "Tuileries Garden", detail: "Room to wander", time: "Afternoon", x: 396, y: 120 },
 ];
 
-export function TripWalkthrough({ onStart }) {
+export function TripWalkthrough({ onStart }: { onStart: (prompt: string) => void }) {
   const [step, setStep] = useState(0);
   const [museumIncluded, setMuseumIncluded] = useState(true);
   const id = useId();
-  const tabRefs = useRef([]);
+  const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const visibleStops = STOPS.filter((_, index) => index !== 1 || museumIncluded);
 
-  const selectStep = (nextStep, focus = false) => {
+  const selectStep = (nextStep: number, focus = false) => {
     setStep(nextStep);
     if (focus) tabRefs.current[nextStep]?.focus();
   };
 
-  const handleTabKey = (event, index) => {
-    let nextStep;
+  const handleTabKey = (event: React.KeyboardEvent, index: number) => {
+    let nextStep: number | undefined;
     if (event.key === "ArrowRight") nextStep = (index + 1) % STEPS.length;
     if (event.key === "ArrowLeft") nextStep = (index + STEPS.length - 1) % STEPS.length;
     if (event.key === "Home") nextStep = 0;

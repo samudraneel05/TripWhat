@@ -13,7 +13,7 @@ const EASE_OUT = "power3.out";
  * Respects prefers-reduced-motion by skipping animation entirely.
  */
 export function useScrollReveal() {
-  const containerRef = useRef(null);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   useGSAP(() => {
     const reduced = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches;
@@ -40,7 +40,7 @@ export function useScrollReveal() {
       });
 
       /* Story articles — slide in from the side they're on */
-      gsap.utils.toArray(".landing-story").forEach((story) => {
+      gsap.utils.toArray<HTMLElement>(".landing-story").forEach((story) => {
         const isReverse = story.classList.contains("landing-story-reverse");
         gsap.from(story, {
           scrollTrigger: { trigger: story, start: "top 82%" },

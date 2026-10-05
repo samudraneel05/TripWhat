@@ -40,14 +40,14 @@ export default function SignupPage() {
     }
   }, [searchParams]);
 
-  const handleChange = (e) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const { name, value } = e.target;
     setFormData((prev) => ({ ...prev, [name]: value }));
     if (error) setError("");
     if (emailExists) setEmailExists(false);
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setError("");
@@ -60,7 +60,7 @@ export default function SignupPage() {
       await signup(formData.email, formData.password, { name: formData.name });
       navigate(postAuthPath, { replace: true });
     } catch (err) {
-      const msg = err.message || "Signup failed";
+      const msg = err instanceof Error ? err.message : "Signup failed";
       setError(msg);
       if (msg.toLowerCase().includes("already exists") || msg.toLowerCase().includes("already registered")) {
         setEmailExists(true);

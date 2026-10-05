@@ -9,10 +9,20 @@ const ProfilePage = () => {
   const { user, logout, updateUser } = useAuth();
   const navigate = useNavigate();
   const [saving, setSaving] = useState(false);
-  const [statistics, setStatistics] = useState(null);
-  const [loadingStats, setLoadingStats] = useState(true);
+  const [statistics, setStatistics] = useState<{
+    totalDaysTraveled?: number;
+    citiesVisited?: number;
+    countriesVisited?: number;
+  } | null>(null);
+  const [, setLoadingStats] = useState(true);
 
-  const [profileData, setProfileData] = useState({
+  const [profileData, setProfileData] = useState<{
+    name: string;
+    email: string;
+    bio: string;
+    avatarUrl: string;
+    preferences: { budget: string; travelStyle: string; interests: string[] };
+  }>({
     name: "",
     email: "",
     bio: "",
@@ -65,7 +75,7 @@ const ProfilePage = () => {
       if (updateUser && res.data?.user) updateUser(res.data.user);
       toast.success("Profile updated successfully!");
     } catch (err) {
-      toast.error(err.message || "Failed to update profile");
+      toast.error(err instanceof Error ? err.message : "Failed to update profile");
     } finally {
       setSaving(false);
     }
