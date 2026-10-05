@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import mapboxgl from 'mapbox-gl';
 import 'mapbox-gl/dist/mapbox-gl.css';
 import { imgUrl } from '../../lib/image';
+import { placesApi } from '../../lib/api';
 
 interface SearchPlacePin {
   placeId: string;
@@ -23,6 +24,10 @@ interface TripMapProps {
    *  correlate without numbered badges. */
   hoveredSearchPlaceId?: string | null;
   onClearSearchPlaces?: () => void;
+  /** Center on the user's browser location at mount — only sensible for a
+   *  blank chat. Reopened conversations skip it; the discussed place owns
+   *  the camera. */
+  geolocate?: boolean;
 }
 
 const MARKER_COLORS = [
@@ -107,7 +112,7 @@ function lookupCityCoord(name: string): [number, number] | null {
   return null;
 }
 
-export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, searchPlaces, onSelectSearchPlace, hoveredSearchPlaceId, onClearSearchPlaces }: TripMapProps) {
+export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, searchPlaces, onSelectSearchPlace, hoveredSearchPlaceId, onClearSearchPlaces, geolocate = true }: TripMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const markersRef = useRef<mapboxgl.Marker[]>([]);
@@ -137,12 +142,14 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
 
     mapRef.current = map;
 
-    // Center on the user's location when nothing else has framed the view.
+    // Center on the user's location — blank chats only. A reopened
+    // conversation has content (or a destination) that owns the camera, and
+    // geolocation resolving late would yank it away.
     // maximumAge lets the browser answer from a recent cached fix — without
     // it every mount waits on a fresh GPS/network fix (the "map sits on the
     // world view for seconds" finickiness). Skipped entirely when itinerary
     // or search pins already own the camera.
-    if (navigator.geolocation) {
+    if (geolocate && navigator.geolocation) {
       navigator.geolocation.getCurrentPosition(
         (pos) => {
           if (!mapRef.current) return;
@@ -403,17 +410,15 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
     }
   }, [hoveredSearchPlaceId]);
 
-  // Fly-to animation when destination changes
+  // Fly-to animation when destination changes — static table first, then a
+  // one-shot places geocode so ANY discussed city centers the map, not just
+  // the ~30 in CITY_COORDS.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !destination || destination === lastDestRef.current) return;
-
-    const coords = lookupCityCoord(destination);
-    if (!coords) return;
-
     lastDestRef.current = destination;
 
-    const doFlyTo = () => {
+    const flyTo = (coords: [number, number]) => {
       map.flyTo({
         center: coords,
         zoom: 5,
@@ -423,12 +428,20 @@ export function TripMap({ itinerary, selectedCity, destination, centerOnCoords, 
         essential: true,
       });
     };
+    const whenReady = (fn: () => void) =>
+      map.loaded() ? fn() : map.once('load', fn);
 
-    if (map.loaded()) {
-      doFlyTo();
-    } else {
-      map.once('load', doFlyTo);
+    const coords = lookupCityCoord(destination);
+    if (coords) {
+      whenReady(() => flyTo(coords));
+      return;
     }
+    // Geocode fallback — the discussed destination owns the camera even
+    // without plotted content (e.g. reopening a mid-planning chat).
+    placesApi.search(destination, 1).then((res) => {
+      const c = res.data?.places?.[0]?.coordinates || res.data?.[0]?.coordinates;
+      if (c?.lat != null && c?.lng != null) whenReady(() => flyTo([c.lng, c.lat]));
+    }).catch(() => {});
   }, [destination]);
 
   // Fly-to animation when centerOnCoords changes (e.g., user clicks an activity)

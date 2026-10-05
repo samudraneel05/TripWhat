@@ -184,6 +184,7 @@ export default function TripWorkspacePage() {
                   searchPlaces={searchPlaces}
                   onSelectSearchPlace={handleSelectPlace}
                   hoveredSearchPlaceId={hoveredSearchPlaceId}
+                  geolocate={false}
                   onClearSearchPlaces={() => useTripStore.getState().setSearchPlaces(null)}
                 />
               ) : (

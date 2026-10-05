@@ -245,6 +245,7 @@ export default function NewTripPage() {
             centerOnCoords={mapCenter}
             onSelectSearchPlace={handleSelectPlace}
             hoveredSearchPlaceId={hoveredSearchPlaceId}
+            geolocate={!routeConvId && !conversationId}
             onClearSearchPlaces={() => useTripStore.getState().setSearchPlaces(null)}
           />
         </div>
